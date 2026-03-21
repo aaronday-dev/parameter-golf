@@ -1,16 +1,14 @@
 # Parameter Golf
 
-This repository packages Aaron's active work on OpenAI's Parameter Golf
-challenge into a standalone project that can be shared directly for compute
-review, collaboration, and submission prep.
+This repository contains a standalone Parameter Golf workspace built from the
+local experiment branch.
 
-The project is not framed as generic LLM tuning. The working lens is:
+The main focus is simple:
 
-- severe post-training quantization as the real constraint
-- small-model architecture as a dynamical system
-- perceptual-coding style intuition about what survives lossy channels
-- careful separation between "interesting float behavior" and "behavior that
-  survives exact int8 roundtrip evaluation"
+- train small language models under the challenge constraints
+- measure exact post-quantization `val_bpb`
+- compare architectural changes against compressed artifact size
+- keep the search legible through logs and notes
 
 ## Current Best Verified Local Result
 
@@ -21,29 +19,31 @@ Best exact real-data result currently in this repo:
 - compressed artifact size: `13,534,421` bytes
 - hardware: Apple Silicon M4 via MLX / Metal
 
-Important earlier milestones:
+Earlier milestones:
 
 - shared-core mirror + directional correction:
   `2.38989686`
 - shared-core mirror + directional correction + `MLP_MULT=3`:
   `2.38131855`
 
-The current evidence says straightforward capacity spending is now beating the
-more elaborate shared-core control family.
+Current local conclusion:
+
+- increasing useful capacity helped
+- extra recurrence and contraction-style controls mostly did not
+- the best local result now comes from a plain sequential `MLP_MULT=3` model
 
 ## What This Repo Contains
 
 - `train_gpt.py`
-  Torch/CUDA trainer with the semantic fixes from the local verification pass.
+  Torch/CUDA trainer.
 - `train_gpt_mlx.py`
-  Apple Silicon / MLX trainer used for the local search loop.
+  Apple Silicon / MLX trainer used for local search.
 - `scripts/`
-  M4-safe run wrappers and small analysis helpers.
+  Run wrappers and small analysis helpers.
 - `docs/`
-  Research log, next-run notes, and archived upstream challenge material.
+  Research log, run notes, and archived upstream challenge material.
 - `results/`
-  Selected run logs showing the progression from shared-core to the current
-  sequential-capacity leader.
+  Selected run logs.
 - `data/README.md`
   Expected local dataset/tokenizer layout.
 
@@ -60,7 +60,7 @@ Then place the tokenizer and dataset shards under `./data/` using the layout in:
 
 - `data/README.md`
 
-For Apple Silicon MLX runs on this M4:
+For Apple Silicon MLX runs:
 
 ```bash
 scripts/run_parameter_golf_mlx_m4.sh
@@ -81,14 +81,13 @@ RUN_MODE=promotion scripts/run_parameter_golf_mlx_m4.sh
 ## Included Experimental Highlights
 
 - `results/mlx_full_mirror_dirc02_200_realval.txt`
-  Early promoted shared-core winner.
+  Early shared-core promoted winner.
 - `results/mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k.txt`
-  Shared-core capacity upgrade that survived promotion.
+  Shared-core `MLP_MULT=3` promoted result.
 - `results/mlx_full_seq_mlp3x_200_realval_vb524k.txt`
   Current best local promoted result.
 - `results/mlx_mirror13_dirc02_cmp.txt`
-  Negative result showing that more mirrored recurrence alone was not the right
-  lever.
+  Negative result: more mirrored recurrence alone regressed.
 
 ## Data
 
@@ -102,15 +101,15 @@ OpenAI Parameter Golf codebase. See:
 
 ## Research Thread
 
-The main narrative lives in:
+The main running log lives in:
 
 - `docs/parameter-golf-research-log.md`
 
-The current practical takeaway is:
+Current practical takeaway:
 
-1. Shared-core mirror scheduling found a real mechanism.
+1. Shared-core mirror scheduling produced a measurable improvement over the earlier baseline.
 2. Blunt contraction / damping / attractor-style controls mostly failed.
 3. Spending more of the artifact budget on useful capacity produced the biggest
    recent gains.
-4. The live frontier has shifted toward plain high-capacity sequential models
-   that still fit under the `16 MB` artifact cap.
+4. The best local result currently comes from a plain higher-capacity sequential
+   model that still fits under the `16 MB` artifact cap.

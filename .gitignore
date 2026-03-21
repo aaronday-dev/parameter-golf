@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
+parameter-golf/data/datasets/
+parameter-golf/data/tokenizers/
+parameter-golf/logs/
+parameter-golf/final_model.pt
+parameter-golf/final_model.int8.ptz
+
+*.npz
+*.ptz

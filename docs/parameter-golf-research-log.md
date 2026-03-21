@@ -1,0 +1,1079 @@
+# Parameter Golf Research Log
+
+Last updated: 2026-03-21
+
+## Purpose
+
+This file is the durable memory for the ongoing `parameter-golf` exploration.
+
+It records:
+
+- what was changed
+- what hypotheses were tested
+- what Aaron contributed conceptually
+- which runs mattered
+- which branches are dead
+- what the current best live ideas are
+
+The aim is to keep the search legible and cumulative, rather than letting it dissolve into chat history and one-off runs.
+
+## Current Status Snapshot
+
+As of `2026-03-21`, the work has split into two distinct tracks:
+
+- model-search track: shared-core recurrence, mirror scheduling, resonance probes, and directional `C` correction
+- trainer-correctness track: making the local MLX and torch scripts tell the truth about evaluation, wallclock, and final verification
+
+The current best promoted architectural result is still the MLX real-data promotion:
+
+- `mlx_full_mirror_dirc02_200_realval`
+- exact `final_int8_zlib_roundtrip val_bpb = 2.38989686`
+
+That remains the best live result because it survived promotion from smoke to a longer real-data run.
+
+The torch work on `2026-03-21` was not new model search. It was semantic cleanup and local verification:
+
+- decouple validation batching from grad accumulation
+- make wallclock accounting actually mean wallclock
+- make final quantized roundtrip verification optional for local smoke
+- make a single-process local MPS smoke path work on the Mac
+
+This did not improve score directly. It improved trust in the training/evaluation loop.
+
+### What The M4 Verification Actually Proved
+
+The successful local torch smoke run is:
+
+- [torch_mps_semanticfix_smoke_smallval_b8.txt](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/logs/torch_mps_semanticfix_smoke_smallval_b8.txt)
+
+That run proved:
+
+- `VAL_MAX_BATCH_TOKENS` is live and logged
+- `wallclock_time` is now logged separately from `train_time`
+- `VERIFY_QUANTIZED_ROUNDTRIP=0` actually skips the final expensive roundtrip eval
+- the torch script can now be smoke-tested locally on Apple Silicon through MPS
+
+The run also surfaced two real bugs that were fixed:
+
+- `shared_core_revisit_damping` was incorrectly referenced as a nonexistent local variable instead of `args.shared_core_revisit_damping`
+- RoPE cache tensors created during `torch.inference_mode()` were being reused in training, causing autograd to fail
+
+Those were not speculative issues. They were directly observed and fixed.
+
+### What Has Not Been Proven Yet
+
+- no CUDA verification has been run on the current `train_gpt.py` from this machine
+- no official-challenge-equivalent `8xH100` run has been done
+- no friend-box or remote-box run has yet validated the torch path after the semantic fixes
+
+So the current state is:
+
+- local MLX architecture search is real
+- local torch trainer semantics are cleaner and locally smoke-verified on MPS
+- CUDA promotion is still pending external hardware
+
+## Repos And Working Context
+
+- Main repo: `/Users/aaronday/dev/discrete-mathematics-for-formal-system-design`
+- Challenge repo: `/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf`
+- Current challenge branch: `codex/shared-core-recurrence-v1`
+
+Supporting docs already created in the main repo:
+
+- [parameter-golf-challenge-parse.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-challenge-parse.md)
+- [parameter-golf-thinking-sheet.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-thinking-sheet.md)
+- [parameter-golf-thinking-sheet.pdf](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-thinking-sheet.pdf)
+- [parameter-golf-ooda-loop.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-ooda-loop.md)
+
+Primary code paths under active modification:
+
+- [train_gpt.py](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/train_gpt.py)
+- [train_gpt_mlx.py](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/train_gpt_mlx.py)
+
+Current caution:
+
+- the upstream soft readability limit in the repo header is now exceeded
+- `train_gpt.py` is over `1500` lines
+- `train_gpt_mlx.py` is over `1500` lines
+
+This is acceptable for exploration, but should be corrected before any cleanup or upstreaming attempt.
+
+## What Aaron Has Contributed
+
+The highest-value human contributions so far have not been hyperparameter tweaks. They have been structural reframings.
+
+### 1. Reframing The Challenge
+
+Aaron correctly reframed the problem as a constrained dynamical system rather than a generic “small LLM” exercise.
+
+Core useful reframings:
+
+- repeated operators matter more than raw parameter count
+- compression survival matters more than elegant float-space behavior
+- revisit order and revisit role are part of the architecture
+- resonance, damping, and attractors are relevant if cashed out into measurable behavior
+
+### 2. OODA / Signal Framing
+
+Aaron introduced an OODA-style search framing:
+
+- observe exact post-quantized score and internal dynamics
+- orient around amplification, damping, mean reversion, and least-bad moves
+- decide on one small mechanistic change
+- act with a reversible run
+
+This was the right move. It prevented the search from degenerating into random knob sweeps.
+
+### 3. A/B/C Role Hypothesis
+
+Aaron proposed:
+
+- `A` as refine
+- `B` as amplify
+- `C` as correct
+- stabilization should happen later, at tuned intervals
+- the important surviving structure under quantization is likely a stable attractor
+
+This directly led to the role-gain, correction, stabilization, and later adaptive/directional `C` correction experiments.
+
+### 4. Lipschitz / Bounded C-Correction
+
+Aaron then proposed that `C` correction should be bounded in a Lipschitz-like sense, and that its strength should be derived from the local “success” of `A` and `B`.
+
+That led to:
+
+- scalar adaptive contractive `C` correction
+- probes for `lambda_C`, `cosAB`, and `amp_ratio`
+- the discovery that the scalar version was coherent but had the wrong geometry
+
+### 5. Direction Over Blanket Contraction
+
+The next useful human push was toward directional correction instead of shrinking the whole state.
+
+That produced the first correction family that stayed close to the mirror baseline without collapsing.
+
+## Detailed Process History
+
+This section records the process as a sequence of moves, not just a pile of run IDs.
+
+### Step 1. Aaron decided not to play the obvious game
+
+The first important move was refusing to treat `parameter-golf` as a generic “tiny LLM competition.”
+
+Aaron pushed the framing toward:
+
+- constrained dynamics
+- repeated operators
+- compression survival
+- recurrence and revisit structure
+
+That changed the search strategy immediately. The goal stopped being “tune more knobs” and became “find a compact repeated structure that earns its bytes.”
+
+### Step 2. The repo was set up for a local exploration loop
+
+The challenge repo was cloned into the main workspace and a local MLX path was made usable.
+
+This included:
+
+- local setup scripts
+- a smoke-data path
+- a one-command MLX smoke runner
+- artifact/log capture in the challenge repo
+
+That was essential because it made the loop fast enough for structural search on a Mac before touching CUDA infrastructure.
+
+### Step 3. Aaron asked for the highest-EV way to engage
+
+Instead of asking “how do I win,” Aaron asked a better question: what is the highest expected-value interaction with this environment, given what he knows and does not know.
+
+That produced the working strategy:
+
+- do not chase the leaderboard first
+- build a clean experimental loop
+- make one structural bet
+- use local runs to discover mechanism before paying for GPU scale
+
+### Step 4. The challenge was parsed into first principles
+
+The repo gained durable framing docs:
+
+- [parameter-golf-challenge-parse.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-challenge-parse.md)
+- [parameter-golf-thinking-sheet.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-thinking-sheet.md)
+- [parameter-golf-thinking-sheet.pdf](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-thinking-sheet.pdf)
+- [parameter-golf-ooda-loop.md](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/examples/parameter-golf-ooda-loop.md)
+
+This mattered because it moved the effort from chat drift to explicit hypotheses.
+
+### Step 5. Aaron chose the first real structural bet: shared-core recurrence
+
+The original upstream model uses `9` effective layers.
+
+Aaron’s first meaningful architectural direction was:
+
+- reuse a smaller number of blocks
+- make schedule shape explicit
+- treat the model as a trajectory through a few reusable operators
+
+That led to:
+
+- `SHARED_CORE_BLOCKS`
+- `SHARED_CORE_SCHEDULE`
+- a mirror-vs-cyclic experiment family
+
+### Step 6. The first real result appeared: mirror beat cyclic
+
+This was the first moment the search moved out of speculation.
+
+On the smoke loop:
+
+- `mlx_shared3_cyclic_cmp` scored `2.66407351`
+- `mlx_shared3_mirror_cmp` scored `2.65437865`
+
+The parameter count was the same. The artifact size was almost the same. The schedule alone mattered.
+
+This established that reuse order is a real architectural variable in this challenge.
+
+### Step 7. Aaron pushed on resonance rather than cosmetically on score
+
+Aaron asked whether resonance-like meta-structure was observable and testable.
+
+That caused a change in method:
+
+- stop relying only on `val_bpb`
+- inspect passwise norms and update magnitudes
+- compare schedules as trajectories, not just outputs
+
+This led to the resonance analysis tooling and the first practical threshold:
+
+- pass-RMS separation over about `5%`
+- delta-norm separation over about `10%`
+- cosine not trusted as a steering signal on its own
+
+### Step 8. Aaron forced the search into an OODA loop
+
+Aaron explicitly reframed the workflow as:
+
+- observe
+- orient
+- decide
+- act
+
+and asked for “least bad move” behavior rather than a proliferation of knobs.
+
+That was the point where the project became a legible experiment program instead of a chat-driven branch explosion.
+
+### Step 9. Aaron introduced the A/B/C role hypothesis
+
+The next shift came from Aaron assigning possible jobs to the three shared blocks:
+
+- `A = refine`
+- `B = amplify`
+- `C = correct`
+
+and proposing that:
+
+- stabilization should happen late
+- the interval should be tunable
+- the most important information to preserve under quantization is stable attractor structure
+
+That produced the role/correction/stabilization family.
+
+### Step 10. Aaron identified the right failure mode in the stabilization idea
+
+The stabilization experiments were useful because they failed in an informative way.
+
+They showed:
+
+- explicit late stabilization slightly improved compressibility
+- but it hurt exact post-quantized score
+
+That sharpened the question from “should we stabilize?” to “what exactly is safe to stabilize?”
+
+### Step 11. Aaron proposed Lipschitz-like C correction from A/B success
+
+This was the strongest conceptual move after the original mirror hypothesis.
+
+The new idea was:
+
+- `C` should not correct blindly
+- `C` should correct only when `A` and `B` were locally successful
+- the correction should be bounded
+- the surviving structure should be a stable attractor, not fragile float detail
+
+That led to scalar adaptive `C` correction driven by:
+
+- `cosAB`
+- `amp_ratio`
+- bounded max gain
+
+### Step 12. The scalar adaptive branch failed, but for a precise reason
+
+The scalar adaptive branch did not improve the exact metric, but it was still valuable.
+
+It showed:
+
+- the gate was real
+- the gate fired in a specific place
+- compressibility improved strongly
+- exact score got worse
+
+This is the point where the project learned that “contract inward” is too blunt.
+
+### Step 13. Aaron then pushed from scalar correction to directional correction
+
+Instead of shrinking the whole state, Aaron pushed toward correcting only the bad direction.
+
+That led to the directional `C` branch, where the system subtracts the projected over-amplified `A/B` mode instead of pulling the entire state toward an anchor.
+
+That is the first correction family that remained close enough to the mirror baseline to matter.
+
+### Step 14. A concrete implementation bug was found and fixed
+
+The first adaptive MLX run failed during save because non-array source metadata had been stored in model state.
+
+The bug was diagnosed and corrected by:
+
+- checking the MLX state tree directly
+- finding integer leaves in adaptive source metadata
+- storing source identifiers as strings instead of tuples of integers
+
+This mattered because it kept the exploration path reproducible instead of leaving a hidden checkpoint hazard in the code.
+
+### Step 15. Aaron asked for outside minds at the right time
+
+The search used other voices when they were useful, not decoratively.
+
+Important external conceptual contributions:
+
+- Singer: keep correction logic in the `GPT` forward seam, not inside `Block`; keep role deltas ephemeral
+- Gödel: the relevant invariant may be a quantized orbit, not continuous similarity
+
+Aaron’s role here was not passive. He chose when to bring in those angles and what part of the search they were meant to clarify.
+
+### Step 16. The schedule result survived a real promotion step
+
+The strongest non-smoke proof so far is that the mirror schedule beat cyclic on a longer real-data run:
+
+- `mlx_full_mirror200_realval = 2.40028927`
+- `mlx_full_cyclic200_realval = 2.40292304`
+
+That means the core architectural effect is not merely a toy smoke artifact.
+
+### Step 17. Directional correction survived promotion and improved the real metric
+
+The directional branch did not merely survive smoke ranking.
+
+It survived the same `200`-step real-data promotion protocol and beat the best promoted mirror line:
+
+- `mlx_full_mirror200_realval = 2.40028927`
+- `mlx_full_mirror_dirc02_200_realval = 2.38989686`
+
+That changed the status of the project. Directional `C` correction stopped being a speculative side branch and became the best promoted result so far.
+
+### Step 18. The first orbit-gated attempt failed in a useful way
+
+After Gödel’s quantized-orbit framing, the first cheap orbit-gated implementation was tested on top of `dirc02`.
+
+What happened:
+
+- the gate was expensive
+- the gate was highly selective
+- the gate suppressed too much of the useful correction
+
+The branch got smaller on disk, but its exact smoke score got clearly worse.
+
+That was still useful because it told us the problem is not “add a hard quantized-future gate and everything improves.”
+It told us the present proxy is too blunt and too costly.
+
+## What The Machine Established
+
+The machine side of the work has reduced the search space substantially.
+
+Known good:
+
+- `3` shared blocks is viable
+- mirror reuse beats cyclic reuse
+- the effect survives promotion from smoke to a more serious `200`-step real-data run
+
+Known weak or dead:
+
+- `1` shared block is too aggressive
+- `pass_x0` reinjection hurts
+- blanket revisit damping hurts
+- naive phase-split revisit gains hurt badly
+- the custom `A A C B B C A A A` schedule underperforms mirror
+- scalar adaptive contractive `C` correction improves compressibility but hurts exact score
+
+Known alive:
+
+- mirror schedule
+- role-biased `A/B/C` interpretation as a near-tie refinement
+- directional `C` correction as a live branch
+
+## Important Reference Runs
+
+### Smoke Baseline Family
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_shared3_cyclic_cmp` | `3` shared blocks, cyclic | `2.66407351` | `3749035` | baseline shared-core line |
+| `mlx_shared3_mirror_cmp` | `3` shared blocks, mirror | `2.65437865` | `3744737` | best simple smoke baseline |
+| `mlx_shared1_cyclic_cmp` | `1` shared block, cyclic | `2.69754880` | `1576008` | too tied, clearly worse |
+| `mlx_shared3_mirror_x0_cmp` | mirror + `pass_x0` | `2.66370193` | `3747526` | worse than mirror |
+
+### Revisit-Gain Family
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_shared3_mirror_revisit_cmp_v2` | mirror + revisit gain | `2.65537863` | `3735691` | coherent but slightly worse |
+| `mlx_shared3_mirror_revisit_damp015_cmp` | mirror + revisit gain + damping | `2.66775012` | `3729617` | damping hurts |
+| `mlx_shared3_mirror_revisit_phase_cmp` | mirror + phase-split revisit gain | `2.71027250` | `3090581` | collapses score |
+
+### Custom A/B/C Schedule Family
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_custom_aacbbcaaa_cmp` | custom `AACBBCAAA` path | `2.67979177` | `3740198` | worse than mirror |
+| `mlx_custom_aacbbcaaa_countgain_cmp` | custom path + revisit-count gain | `2.67346598` | `3736444` | slight improvement, still not competitive |
+
+### Role / Correction / Stabilization Family
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_mirror_rolecorr_cmp` | role gains + fixed `C` correction | `2.65546615` | `3744043` | near tie, alive |
+| `mlx_mirror_rolecorr_stab7e2_cmp` | role/correct + sparse late stabilization | `2.65697448` | `3740005` | stabilization hurts |
+| `mlx_mirror_rolecorr_stab7e1_cmp` | role/correct + dense late stabilization | `2.65910760` | `3740726` | hurts more |
+
+### Scalar Adaptive C-Correction
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_mirror_role_adaptc04_fix_cmp` | scalar adaptive `C`, max gain `0.04` | `2.66780102` | `3639092` | coherent but clearly bad for score |
+| `mlx_mirror_role_adaptc01_cmp` | scalar adaptive `C`, max gain `0.01` | `2.66223291` | `3639589` | less bad, still dead |
+
+Probe files:
+
+- [adaptive_gate_mlx_mirror_role_adaptc04_fix_cmp.json](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/logs/adaptive_gate_mlx_mirror_role_adaptc04_fix_cmp.json)
+- [adaptive_gate_mlx_mirror_role_adaptc01_cmp.json](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/logs/adaptive_gate_mlx_mirror_role_adaptc01_cmp.json)
+
+Main read:
+
+- the scalar gate fired only on pass `7`
+- it improved compressibility but degraded exact post-quantized score
+- conclusion: the mechanism was real, but the correction geometry was wrong
+
+### Directional C-Correction
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_mirror_role_dirc04_cmp` | directional `C`, max gain `0.04` | `2.65513593` | `3741527` | much better than scalar branch |
+| `mlx_mirror_role_dirc02_cmp` | directional `C`, max gain `0.02` | `2.65466476` | `3741104` | best correction branch so far |
+| `mlx_mirror_role_dirc015_cmp` | directional `C`, max gain `0.015` | `2.65685054` | `3743438` | too weak / less good than `0.02` |
+
+Probe file for the best directional smoke run:
+
+- [gate_probe_mlx_mirror_role_dirc02_cmp.json](/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/logs/gate_probe_mlx_mirror_role_dirc02_cmp.json)
+
+Important directional probe read:
+
+- the gate still fires only on pass `7`
+- `mean_active_lambda ~= 0.01344`
+- `mean_active_cos_ab ~= 0.99373`
+- `mean_active_amp_ratio ~= 2.26765`
+
+Interpretation:
+
+- only one revisit site needs correction
+- suppressing the offending direction is much safer than shrinking the whole state
+- this is the first correction branch that stayed genuinely close to the mirror baseline
+
+### Real-Data Promotion Runs
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_full_mirror200_realval` | mirror, full real validation, `200` steps | `2.40028927` | `4082425` | best proven promoted line |
+| `mlx_full_cyclic200_realval` | cyclic, full real validation, `200` steps | `2.40292304` | `4093619` | mirror still wins |
+| `mlx_full_mirror_dirc02_200_realval` | mirror + directional `C`, full real validation, `200` steps | `2.38989686` | `4074385` | directional correction survived promotion and beat mirror |
+
+Key conclusion from promotion:
+
+- mirror beat cyclic by `0.00263377` `bpb` on the exact post-quantized real-data comparison
+- that means the schedule effect survived a meaningful promotion step
+- directional `C` then beat the promoted mirror line by `0.01039241` `bpb`
+- that means the first correction branch was not just alive on smoke; it survived promotion and improved the real metric
+
+### Orbit-Gated Directional Correction
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_mirror_role_dirc02_orbit3_cmp` | `dirc02` + orbit gate, smoke, `3` future steps | `2.67923063` | `3289450` | dead branch in current form |
+
+Important orbit-gate read:
+
+- the orbit gate roughly doubled smoke step time, from about `422ms` to about `942ms`
+- exact smoke score got much worse, from `2.65466476` to `2.67873100`
+- replay analysis showed mean orbit-match only `0.25` at the active `C` revisit
+- effective gate strength collapsed from about `0.01344` to about `0.00314`
+
+Interpretation:
+
+- the current orbit proxy is too selective and too expensive
+- it is not yet the right operationalization of Gödel’s idea
+- the quantized-basin hypothesis may still be correct, but this implementation is not
+
+### Switched Attractor Pulse
+
+| run_id | idea | exact val_bpb | artifact bytes | verdict |
+| --- | --- | ---: | ---: | --- |
+| `mlx_mirror_role_dirc02_pulse2_cmp_v2` | `dirc02` + thresholded attractor pulse, `T=2` | `2.66092593` | `3667363` | alive as control law, worse than plain `dirc02` |
+
+Important pulse read:
+
+- this was much cheaper than the hard orbit gate
+- smoke step time rose to about `553ms`, not `~940ms`
+- replay showed the pulse selected on every active revisit under the current threshold
+- replay stress delta was positive, about `0.10065`, so the pulse branch did reduce the cheap quant-stress proxy
+- exact score still got worse, from `2.65466476` to `2.66092593`
+
+Interpretation:
+
+- the switched-control idea is coherent
+- the current attractor target is still too blunt
+- reducing the cheap quant-stress proxy is not enough by itself to preserve the real objective
+
+## Resonance Findings
+
+Resonance-like structure is real in this system, but it does not show up in every metric equally.
+
+Useful:
+
+- pass RMS
+- relative delta norm
+- schedule-conditioned drift
+
+Not very useful as a steering metric:
+
+- cosine alone
+
+Working heuristic established during the resonance passes:
+
+- pay attention when a schedule causes pass-RMS separation `> 5%` on at least `3` post-divergence passes
+- and delta-norm separation `> 10%` on at least `3` post-divergence passes
+- ignore cosine unless it becomes much larger than what was observed in the current mirror/cyclic split
+
+## Singer’s Useful Contribution
+
+Singer’s best contribution was architectural hygiene:
+
+- patch shared-core correction logic in the `GPT` forward seam, not inside `Block`
+- keep block-role deltas ephemeral, not persistent module state
+- avoid introducing non-array state into the MLX checkpoint tree
+
+This prevented a worse design and also helped localize the MLX serialization bug that appeared during the first adaptive gate attempt.
+
+## Gödel’s Idea
+
+Gödel’s contribution was the best conceptual reframing since the original mirror schedule win.
+
+Plain-English version:
+
+- do not correct based only on continuous closeness
+- correct only inside regions whose short quantized orbit is already stable
+- move inward only up to the point where the quantized orbit would change
+
+The core object is a short quantized orbit under the mirror-step operator:
+
+- `Omega(x) = (Q(x), Q(Mx), Q(M^2 x))`
+
+Where:
+
+- `M` is the mirror schedule operator
+- `Q` is the effective quantizer relevant to the final evaluation
+
+Gödel’s suggested invariant:
+
+- if `Omega(A) = Omega(B)`, then a local contraction might be safe
+- if not, do nothing
+
+The first cheap proxy has now been implemented once, and it failed.
+
+So the idea itself is not dead, but the current proxy implementation is not the right next operational form.
+
+## Current Best State
+
+### Best Simple Smoke Baseline
+
+- `mlx_shared3_mirror_cmp`
+- exact `val_bpb = 2.65437865`
+
+### Best Correction Branch On Smoke
+
+- `mlx_mirror_role_dirc02_cmp`
+- exact `val_bpb = 2.65466476`
+- gap to mirror baseline: `+0.00028611`
+
+This is close enough to matter.
+
+### Best Real-Data Proven Result
+
+- `mlx_full_mirror_dirc02_200_realval`
+- exact `val_bpb = 2.38989686`
+
+### Current Promotion Target
+
+The next open question is no longer whether `dirc02` survives promotion. It did.
+
+The next serious target is:
+
+- a cheaper, better-grounded quantized-basin gate
+- or a more targeted quantization-aware correction that preserves the `dirc02` win without doubling runtime
+
+## What Aaron Has Actually Done In Practice
+
+This is the practical summary of Aaron’s part in the loop so far.
+
+Aaron has:
+
+- chosen to prototype locally before paying for serious GPU time
+- insisted on a first-principles parse instead of leaderboard imitation
+- repeatedly redirected the search away from random tuning and toward mechanism
+- supplied the key architectural metaphors that generated the most useful branches
+- identified stable attractors as the relevant surviving object under quantization
+- asked for instrumentation when raw scores were no longer enough
+- pushed the correction idea from blanket stabilization to bounded correction and then to directional correction
+- requested durable documentation so the work does not vanish into chat memory
+
+That is a real research contribution, not merely “prompting an assistant.”
+
+## Dead Branches
+
+Unless new evidence emerges, these branches should be treated as closed:
+
+- `1` shared block
+- `pass_x0`
+- blanket revisit damping
+- naive phase-split revisit gain
+- custom `AACBBCAAA` schedule as currently implemented
+- scalar adaptive contractive `C` correction
+- periodic stabilization as currently implemented
+- aggressive mirror-cancellation pulse
+- lowered `dirc02` max gain at `0.015`
+- quant-stress lambda guard as currently implemented
+
+## Mirror-Cancellation Follow-Up
+
+This branch tested a literal phase-cancellation trigger on top of `dirc02`.
+
+The mechanism:
+
+- compare the current mirrored revisit against its earlier mirror partner
+- measure uncancelled residual
+- only allow the extra attractor pulse when that residual stays above a threshold
+
+### Aggressive Mirror-Cancellation Pulse
+
+- `mlx_mirror_role_dirc02_mirrorpulse_aggr_cmp`
+- exact `val_bpb = 2.67254228`
+- step average `617.79ms`
+
+This is worse than plain `dirc02` on both score and speed.
+
+### Conservative Mirror-Cancellation Pulse
+
+- `mlx_mirror_role_dirc02_mirrorpulse_cons_cmp`
+- exact `val_bpb = 2.64605443`
+- step average `519.00ms`
+
+This looked promising on smoke score.
+
+However, the gate probe showed something important:
+
+- pulse selection rate at the active pass was effectively `0.0`
+- the extra attractor did not actually fire
+
+So this run should **not** be interpreted as evidence that phase inversion is helping. It is better read as a nearby no-op variant with slight smoke variance.
+
+### Gate Probe Read
+
+Probe output:
+
+- `gate_probe_mirrorpulse_compare.json`
+
+Key read:
+
+- aggressive branch active pass `7`
+- aggressive pulse selection mean `0.0`
+- aggressive mirror residual mean about `0.9937`
+- conservative branch active pass `7`
+- conservative pulse selection mean `0.0`
+- conservative mirror residual mean about `0.9955`
+
+Interpretation:
+
+- the mirror-cancellation trigger is not yet a live steering mechanism
+- the aggressive and conservative variants changed compile/numeric behavior, but did not actually activate the extra pulse
+
+## Lower-Lambda Follow-Up
+
+After the mirror-cancellation probe showed a dead gate, the next direct test was:
+
+- keep plain `dirc02`
+- lower `SHARED_CORE_DIRECTIONAL_CORRECT_MAX_GAIN` from `0.020` to `0.015`
+
+Result:
+
+- `mlx_mirror_role_dirc015_cmp`
+- exact `val_bpb = 2.66421949`
+
+This is a clean regression.
+
+So the current best operational read is:
+
+- keep `dirc02`
+- keep the existing `0.020` max gain
+- do not adopt the mirror-cancellation pulse as a working branch yet
+
+## Quant-Stress Lambda Guard
+
+The next branch tried to stay on the live `dirc02` seam and only reduce `lambda` when the directional correction itself increased local quantization stress.
+
+Run:
+
+- `mlx_mirror_role_dirc02_stressguard_cmp`
+- exact `val_bpb = 2.67273248`
+
+Probe:
+
+- `gate_probe_mlx_mirror_role_dirc02_stressguard_cmp.json`
+
+Important read:
+
+- stress-guard factor on the active pass was `1.0`
+- stress delta on the active pass was `0.0`
+
+So this branch is not merely bad. It is another dead control:
+
+- it did not actually reduce `lambda`
+- it still made the run worse
+
+That is enough to close it in its current form.
+
+## Open Questions
+
+1. Can a quantization-aware control improve `dirc02` without destroying runtime or selectivity?
+2. Should that control be soft and local rather than a hard orbit gate?
+3. Is the next useful abstraction still Gödel’s quantized-orbit invariant, or something cheaper such as a quantization-sensitivity bias on the correction strength?
+4. Should the current trainer logic be compacted into helpers before any further idea expansion?
+
+## Immediate Next Step
+
+Do not promote another branch until a probe shows a control with:
+
+- nonzero engagement on the active pass
+- bounded selectivity
+- and a smoke score that is genuinely attributable to that control
+
+Right now the only trusted promoted line remains:
+
+- `mlx_full_mirror_dirc02_200_realval`
+
+## Current Status Snapshot
+
+The current trusted best promoted result is still:
+
+- `mlx_full_mirror_dirc02_200_realval`
+- exact `val_bpb = 2.38989686`
+- int8+zlib artifact `4,074,385` bytes
+
+That artifact size matters. It means the live branch is still using only about one quarter of the `16 MB` budget, so the next serious search pressure moved away from dead controls and toward spending more capacity.
+
+### Depth-Only Follow-Up Closed
+
+A direct effective-depth push was tested by increasing mirrored shared-core recurrence without increasing unique block capacity:
+
+- `mlx_mirror13_dirc02_cmp`
+- config: `NUM_LAYERS=13`, `SHARED_CORE_BLOCKS=3`, `mirror + dirc02`
+- exact `val_bpb = 2.67693325`
+- int8+zlib artifact `3,491,385` bytes
+
+Interpretation:
+
+- extra revisit depth alone made the branch worse
+- the loop is not simply under-iterated
+- the next useful spend is richer blocks, not more passes through the same mirrored carrier
+
+### Capacity Follow-Up Alive
+
+The next branch increased useful block capacity while keeping the proven recurrence mechanism fixed:
+
+- `mlx_mirror_mlp3x_dirc02_cmp`
+- config: `MLP_MULT=3`, `SHARED_CORE_BLOCKS=3`, `mirror + dirc02`
+- model params `7,610,404`
+- exact `val_bpb = 2.64687904`
+- int8+zlib artifact `4,545,781` bytes
+
+This is the first clean post-`dirc02` improvement in the current burst that is attributable to a real architectural change rather than a dead gate or smoke variance.
+
+### Promotion In Flight
+
+Because the `MLP_MULT=3` branch improved exact smoke score, it has been promoted to the same real-data protocol used for the current best line:
+
+- run id: `mlx_full_mirror_mlp3x_dirc02_200_realval`
+- protocol: `200` steps, real `fineweb10B_sp1024` validation, exact int8 roundtrip verification
+- status: crashed during validation on `2026-03-21`
+
+Observed failure point:
+
+- training completed through `step:200/200`
+- validation only reached `val_progress:1/30`
+- no serialized model artifact was written
+
+Working interpretation:
+
+- the branch itself is still alive
+- the most likely problem is validation-memory pressure from `VAL_MAX_BATCH_TOKENS=2097152` on the larger `MLP_MULT=3` model
+- the next retry should keep the same training branch and lower validation batch size before changing architecture
+
+Decision rule:
+
+- if this beats `2.38989686`, it becomes the new live leader
+- if it does not, the next branch should spend budget on width, not more mirrored depth and not more control logic
+
+### M4 Retry And Outcome
+
+The first real-data promotion of `MLP_MULT=3` crashed the whole machine during validation.
+
+Retry:
+
+- `mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k`
+- same branch, but `VAL_MAX_BATCH_TOKENS=524288`
+
+Result:
+
+- exact `val_bpb = 2.38131855`
+- previous best was `2.38989686`
+- improvement: about `0.00858 bpb`
+- int8+zlib artifact `5,012,890` bytes
+
+Interpretation:
+
+- the branch was real
+- the crash was validation-pressure, not a false-positive model
+- richer block capacity beat the earlier best shared-core line
+
+### Branch A / Branch B Tournament
+
+With the new M4-safe wrapper in place, two follow-up smoke branches were run back to back.
+
+#### Branch A: Width-First Shared-Core
+
+- `mlx_mirror_dim640_mlp3x_dirc02_cmp`
+- config: `MODEL_DIM=640`, `NUM_HEADS=10`, `NUM_KV_HEADS=5`, `MLP_MULT=3`, keep `mirror + dirc02`
+- exact `val_bpb = 2.66895938`
+- int8+zlib artifact `6,190,593` bytes
+
+This is a clean regression. More width on top of the winning shared-core family did not help.
+
+#### Branch B: Sequential Capacity Challenger
+
+- `mlx_seq_mlp3x_cmp`
+- config: full sequential `9` unique blocks, `MLP_MULT=3`
+- exact `val_bpb = 2.61722235`
+- int8+zlib artifact `12,448,165` bytes
+
+This is a strong smoke win over the current shared-core smoke leader.
+
+Interpretation:
+
+- the latest gains may have come more from capacity allocation than from shared-core structure
+- shared-core is still alive on promoted real-data evidence
+- but it no longer deserves default priority over a stronger sequential-capacity challenger
+
+### New Promotion In Flight
+
+Because Branch B won clearly on smoke and still fits under the `16 MB` cap, it has been promoted:
+
+- run id: `mlx_full_seq_mlp3x_200_realval_vb524k`
+- protocol: real `fineweb10B_sp1024`, `200` steps, exact int8 roundtrip, M4-safe validation batch
+
+## Iteration Annotation: Late-C Clarification
+
+This iteration added a useful correction to the framing around damping and delayed correction.
+
+Aaron's useful push was:
+
+- reject the earlier sloppy reading of "Lipschitz" as something to implement directly
+- restate the real concern as information loss from early blunt correction
+- point out that shaving amplitude peaks too early can destroy relative separation that may still matter after quantization
+- insist that the live question is not generic smoothness, but whether the re-encoding stage is being invoked too early and too bluntly
+
+That contribution is consistent with the machine evidence.
+
+It matches the dead-branch pattern:
+
+- blanket revisit damping hurt
+- scalar adaptive contractive `C` hurt
+- stabilization-style controls hurt
+- attractor and orbit-style pulls reduced proxies without preserving the exact roundtrip objective
+
+So the anti-smoothing instinct was good.
+
+Aaron's overreach in this same iteration was:
+
+- jumping from "early blunt correction is bad" to "therefore much longer `A/B/A/B/...` carrier loops before `C` should win"
+
+The log does **not** support that stronger claim.
+
+Closest counterevidence already in hand:
+
+- more mirrored recurrence without more unique capacity (`mlx_mirror13_dirc02_cmp`) regressed badly
+- the custom `AACBBCAAA` schedule also regressed
+
+So the correct update is narrower:
+
+- preserve amplitude longer, yes
+- delay correction selectively, yes
+- but do **not** assume that extra carrier passes through the same reused blocks are inherently good
+
+The real search object is probably not a single scalar like "how long do we wait before `C`."
+
+It is more likely a small structural family:
+
+- fixed-depth schedules that let `A/B` carry longer
+- sparse late `C` placements
+- at least one late `C` revisit so the proven directional seam can still engage
+- correction strength tied to quantization-sensitive structure, not generic contraction
+
+Working practical read:
+
+- this is still partly a parameter search
+- but the parameter is probably not one knob
+- it is a bounded architectural micro-search over late-`C` schedule geometry plus quantization-aware correction timing
+
+Best current bounded next-step family:
+
+- `ABABABCAC`
+- `ABABABCBC`
+- `ABABACBAC`
+
+These should be treated as **fixed-depth** tests, not invitations to "wait until God or the checkered flag."
+
+If OpenAI compute arrives, this is a good place to spend it:
+
+- launch `5-6` tightly chosen late-`C` variants
+- keep `dirc02` alive
+- require probe evidence of a real late active pass
+- promote only the variants whose gain is attributable, not just smoke variance
+
+## Iteration Annotation: Interpreting A Possible `MLP_MULT=3` Win
+
+This iteration clarified what a successful `MLP_MULT=3` promotion would and would not mean.
+
+If `mlx_full_mirror_mlp3x_dirc02_200_realval` beats the current trusted line by a real margin, the strongest update is:
+
+- the shared recurrent carrier is probably real
+- targeted late correction is probably real
+- the next bottleneck is more likely operator capacity than "invoke `C` later and later"
+
+That would support the broad systems hypothesis:
+
+- post-quantized performance depends on internal organization, not just standard tuning
+
+But it would weaken the narrower reading:
+
+- "the main missing ingredient is longer `A/B` chewing before `C`"
+
+If `MLP_MULT=3` wins, the cleaner explanation is:
+
+- richer transforms beat extra reuse depth
+- artifact budget should first be spent on stronger operators before more schedule cleverness
+
+Working decision rule:
+
+- if the promoted `MLP_MULT=3` branch improves by less than about `0.005 bpb`, treat it as encouraging but not decisive
+- if it improves by about `0.01 bpb` or more, default belief should shift toward capacity-first, schedule-second
+- if it fails to beat `2.38989686`, the late-`C` family gets more oxygen again
+
+Compute-credit implication:
+
+- with credits, we stop treating each branch as a sacred single guess
+- the immediate value is bounded parallel family search, repeated promotion, and CUDA transfer checks
+- the biggest direct beneficiaries would be the `MLP_MULT=3` / width-first family, the late-`C` fixed-depth family, and CUDA verification of whichever branch survives locally
+
+## Ideation Note: Phase / Harmonics
+
+This idea was raised as a possible explanation for why early blunt correction feels wrong:
+
+- amplitude peaks may carry real information
+- shaving them too early may reduce quantization-relevant separation
+- perhaps some cheaper harmonic object survives better than the raw path
+
+The useful part of that intuition is:
+
+- coarse structured variation can survive lossy channels better than fragile detail
+
+But the first literal payload reading is probably wrong for this project.
+
+Why the full payload-harmonic idea is weak:
+
+- the challenge score depends on the final exact int8 roundtrip model artifact, not the training-time waveform
+- dense transformer weight coordinates do not live on a stable physical axis where ordinary harmonic coding is naturally meaningful
+- current probes show one late amplified recurrent mode, not a rich oscillatory family
+- fine phase-coded residual structure is exactly the kind of thing int8 clipping tends to destroy
+- any harmonic payload scheme would also have to pay code and decode overhead inside the artifact budget
+
+Current best critical read:
+
+- phase / harmonics are probably the wrong object at the full-payload level
+- they may still be alive as a **control-basis** idea
+
+That narrower version means:
+
+- use spectral or phase-like parameterizations only over meaningful ordered axes such as layer depth or revisit index
+- consider a tiny basis for step scales, revisit gains, or correction strength over depth
+- only pursue this if probes show real oscillatory structure across revisit count rather than simple monotone amplification
+
+So the idea is not closed, but it has been demoted:
+
+- probably wrong as artifact encoding
+- still plausible as a compact control-law parameterization
+
+## Iteration Annotation: Localized QAT Or Kill It
+
+External critique in this iteration was strong and mostly correct.
+
+Main correction:
+
+- the current mechanism story is too confident relative to the actual challenge regime
+- many of the detailed "live branch / dead branch / active late mode" claims were learned from MLX smoke-scale runs and should be treated as provisional local steering, not established frontier mechanism
+
+Most important priority update:
+
+- the quantization-robustness family is currently a low-priority branch on the best promoted local line
+- the exact post-quant gap on the current trusted `dirc02` result is already very small
+- therefore a pure "survive quantization better" idea has limited upside unless it also changes the learned float solution itself
+
+Best critical reduction of the idea:
+
+- "learn quantization-safe equivalence classes" is too abstract and mostly the wrong object
+- the only coherent narrow version is localized QAT on the actually sensitive locus
+- in plain terms: fake-quantize the measured sensitive pass, measure the induced drift, and penalize only the harmful component of that drift
+
+That means:
+
+- no payload coding theory
+- no hidden-state class language
+- no broad control-basis expansion before diagnostics
+
+Required order of operations if this family is revisited:
+
+1. finish and evaluate the promoted `MLP_MULT=3` branch
+2. if needed later, run a diagnostic to localize where quantization damage actually enters
+3. kill the whole idea quickly unless late `C` explains a meaningful share of the quantization penalty
+4. only then consider one scalar localized QAT auxiliary, not a broader theory stack
+
+Current decision:
+
+- wait for `MLP_MULT=3`
+- treat capacity-first as the current lead explanation if it promotes successfully
+- defer any quantization-consistency training branch until the diagnostic case is strong enough to justify it

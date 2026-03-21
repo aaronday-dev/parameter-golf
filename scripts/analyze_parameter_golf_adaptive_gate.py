@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-PG_DIR = ROOT / "parameter-golf"
+PG_DIR = ROOT
 PG_MLX_PATH = PG_DIR / "train_gpt_mlx.py"
 DEFAULT_DATA_PATH = PG_DIR / "data" / "datasets" / "fineweb10B_sp1024_smoke"
 

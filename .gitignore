@@ -4,11 +4,11 @@ __pycache__/
 .venv/
 .python-version
 
-parameter-golf/data/datasets/
-parameter-golf/data/tokenizers/
-parameter-golf/logs/
-parameter-golf/final_model.pt
-parameter-golf/final_model.int8.ptz
+data/datasets/
+data/tokenizers/
+logs/
+final_model.pt
+final_model.int8.ptz
 
 *.npz
 *.ptz

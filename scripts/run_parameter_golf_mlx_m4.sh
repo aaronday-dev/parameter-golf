@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PG_DIR="${ROOT_DIR}/parameter-golf"
+PG_DIR="${ROOT_DIR}"
 
 if [[ ! -x "${PG_DIR}/.venv/bin/python" ]]; then
-  echo "Missing ${PG_DIR}/.venv. Run scripts/setup_parameter_golf.sh first." >&2
+  echo "Missing ${PG_DIR}/.venv. Create it with 'python3 -m venv .venv' and install requirements.txt." >&2
   exit 1
 fi
 
@@ -27,18 +27,18 @@ esac
 
 if [[ "${MODE}" == "smoke" ]]; then
   if [[ ! -f "${PG_DIR}/data/datasets/fineweb10B_sp1024_smoke/fineweb_train_000000.bin" ]] || [[ ! -f "${PG_DIR}/data/datasets/fineweb10B_sp1024_smoke/fineweb_val_000000.bin" ]]; then
-    echo "Missing Parameter Golf smoke data. Run scripts/setup_parameter_golf.sh first." >&2
+    echo "Missing Parameter Golf smoke data under ${PG_DIR}/data. See data/README.md." >&2
     exit 1
   fi
 else
   if [[ ! -f "${PG_DIR}/data/datasets/fineweb10B_sp1024/fineweb_train_000000.bin" ]] || [[ ! -f "${PG_DIR}/data/datasets/fineweb10B_sp1024/fineweb_val_000000.bin" ]]; then
-    echo "Missing Parameter Golf full data. Run scripts/setup_parameter_golf.sh first." >&2
+    echo "Missing Parameter Golf full data under ${PG_DIR}/data. See data/README.md." >&2
     exit 1
   fi
 fi
 
 if [[ ! -f "${PG_DIR}/data/tokenizers/fineweb_1024_bpe.model" ]]; then
-  echo "Missing Parameter Golf tokenizer. Run scripts/setup_parameter_golf.sh first." >&2
+  echo "Missing Parameter Golf tokenizer under ${PG_DIR}/data/tokenizers. See data/README.md." >&2
   exit 1
 fi
 

@@ -17,6 +17,11 @@ It records:
 
 The aim is to keep the search legible and cumulative, rather than letting it dissolve into chat history and one-off runs.
 
+Presentation note:
+
+- some historical links below still point back to the original local workspace
+- the headline archived run logs for this standalone repo live under `results/`
+
 ## Current Status Snapshot
 
 As of `2026-03-21`, the work has split into two distinct tracks:
@@ -24,12 +29,18 @@ As of `2026-03-21`, the work has split into two distinct tracks:
 - model-search track: shared-core recurrence, mirror scheduling, resonance probes, and directional `C` correction
 - trainer-correctness track: making the local MLX and torch scripts tell the truth about evaluation, wallclock, and final verification
 
-The current best promoted architectural result is still the MLX real-data promotion:
+The current best promoted architectural result is now the MLX real-data promotion:
 
-- `mlx_full_mirror_dirc02_200_realval`
-- exact `final_int8_zlib_roundtrip val_bpb = 2.38989686`
+- `mlx_full_seq_mlp3x_200_realval_vb524k`
+- exact `final_int8_zlib_roundtrip val_bpb = 2.37334218`
+- compressed artifact size: `13,534,421` bytes
 
-That remains the best live result because it survived promotion from smoke to a longer real-data run.
+That displaced the earlier shared-core leaders:
+
+- `mlx_full_mirror_dirc02_200_realval` at `2.38989686`
+- `mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k` at `2.38131855`
+
+The current evidence says straightforward sequential capacity is now beating the best shared-core recurrence family on this local track.
 
 The torch work on `2026-03-21` was not new model search. It was semantic cleanup and local verification:
 

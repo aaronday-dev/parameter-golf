@@ -1,7 +1,8 @@
-# Parameter Golf Lab
+# Parameter Golf
 
 This repository packages Aaron's active work on OpenAI's Parameter Golf
-challenge into a standalone Git-ready project.
+challenge into a standalone project that can be shared directly for compute
+review, collaboration, and submission prep.
 
 The project is not framed as generic LLM tuning. The working lens is:
 
@@ -30,25 +31,52 @@ Important earlier milestones:
 The current evidence says straightforward capacity spending is now beating the
 more elaborate shared-core control family.
 
-## Why This Repo Exists
+## What This Repo Contains
 
-The original work lived inside a broader local workspace. This repo isolates the
-Parameter Golf code, wrappers, logs, and research notes so it can be:
-
-- published cleanly on Git
-- shared for compute-grant review
-- extended without dragging unrelated workspace files around
-
-## Structure
-
-- `parameter-golf/`
-  Derived training code and upstream README/license material.
+- `train_gpt.py`
+  Torch/CUDA trainer with the semantic fixes from the local verification pass.
+- `train_gpt_mlx.py`
+  Apple Silicon / MLX trainer used for the local search loop.
 - `scripts/`
-  Run wrappers and small analysis tools.
+  M4-safe run wrappers and small analysis helpers.
 - `docs/`
-  Research log, next-run plan, and conceptual notes.
+  Research log, next-run notes, and archived upstream challenge material.
 - `results/`
-  Selected logs that show the progression of the search.
+  Selected run logs showing the progression from shared-core to the current
+  sequential-capacity leader.
+- `data/README.md`
+  Expected local dataset/tokenizer layout.
+
+## Quick Start
+
+Create a local environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Then place the tokenizer and dataset shards under `./data/` using the layout in:
+
+- `data/README.md`
+
+For Apple Silicon MLX runs on this M4:
+
+```bash
+scripts/run_parameter_golf_mlx_m4.sh
+```
+
+For smoke mode:
+
+```bash
+RUN_MODE=smoke scripts/run_parameter_golf_mlx_m4.sh
+```
+
+For the longer local promotion profile:
+
+```bash
+RUN_MODE=promotion scripts/run_parameter_golf_mlx_m4.sh
+```
 
 ## Included Experimental Highlights
 
@@ -62,22 +90,6 @@ Parameter Golf code, wrappers, logs, and research notes so it can be:
   Negative result showing that more mirrored recurrence alone was not the right
   lever.
 
-## Running On An M4
-
-Use the M4-safe wrapper:
-
-```bash
-scripts/run_parameter_golf_mlx_m4.sh
-```
-
-Modes:
-
-- `RUN_MODE=smoke`
-- `RUN_MODE=promotion`
-
-The wrapper keeps validation conservative enough to reduce whole-machine crashes
-on larger MLX runs while still preserving exact int8 roundtrip checks.
-
 ## Data
 
 Datasets are not vendored here.
@@ -85,7 +97,8 @@ Datasets are not vendored here.
 This repo assumes the same dataset and tokenizer layout used by the upstream
 OpenAI Parameter Golf codebase. See:
 
-- `parameter-golf/data/README.md`
+- `data/README.md`
+- `docs/upstream-openai-readme.md`
 
 ## Research Thread
 

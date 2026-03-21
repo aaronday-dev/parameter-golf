@@ -1,7 +1,12 @@
 # Parameter Golf Next Runs
 
-This note captures the next two MLX runs to launch after the current promoted
-`MLP_MULT=3` shared-core validation finishes.
+This note captures the branching logic that followed the promoted
+`MLP_MULT=3` shared-core run.
+
+Historical outcome:
+
+- Branch A regressed on smoke at `2.66895938`
+- Branch B promoted cleanly and became the current local leader at `2.37334218`
 
 ## Branch A: Width-First On The Winning Shared-Core Family
 

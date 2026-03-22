@@ -1092,3 +1092,24 @@ Current decision:
 - wait for `MLP_MULT=3`
 - treat capacity-first as the current lead explanation if it promotes successfully
 - defer any quantization-consistency training branch until the diagnostic case is strong enough to justify it
+
+## Iteration Annotation: LZMA Path Verified
+
+The `lzma` artifact path is now verified end-to-end on the standalone repo.
+
+Verification run:
+
+- `mlx_seq_mlp4x_lzma_cmp_v2`
+- exact `val_bpb = 2.61172375`
+- artifact line: `serialized_model_int8_lzma:13522952 bytes`
+
+What this established:
+
+- the trainer now writes `.ptx` artifacts by default
+- the trainer can reload the `lzma` artifact and complete the final exact roundtrip evaluation
+- the exact roundtrip score remains consistent with the earlier `MLP_MULT=4` smoke branch
+
+Practical implication:
+
+- the storage-format issue is no longer the active bottleneck
+- future search should treat `lzma` as the default artifact path and focus back on model quality per byte, not on serializer rescue work

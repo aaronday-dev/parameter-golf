@@ -1,0 +1,2046 @@
+#!/usr/bin/env python3
+"""
+The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
+
+Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import lzma
+import math
+import os
+import pickle
+import sys
+import time
+import uuid
+import zlib
+from collections.abc import Callable
+from pathlib import Path
+
+import numpy as np
+import sentencepiece as spm
+
+import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as optim
+from mlx.utils import tree_flatten, tree_unflatten
+
+# ==============================================================================
+# SHARD FORMAT + COMPUTE DTYPE
+# ==============================================================================
+
+COMPUTE_DTYPE = mx.bfloat16
+
+# ==============================================================================
+# HYPERPARAMETERS
+# ==============================================================================
+# Default Simple Baseline run:
+# - 9 transformer blocks at width 512
+# - 8 attention heads with 4 KV heads (GQA) and 2x MLP expansion
+# - vocab size 1024, sequence length 1024, tied embeddings
+# - 524,288 train tokens per step for 20,000 iterations with a ~10 minute cap
+class Hyperparameters:
+    # Data / tokenizer.
+    data_path: str = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
+    tokenizer_path: str = os.environ.get("TOKENIZER_PATH", "./data/tokenizers/fineweb_1024_bpe.model")
+    run_id: str = os.environ.get("RUN_ID", str(uuid.uuid4()))
+    seed: int = int(os.environ.get("SEED", 1337))
+
+    # Training loop. These defaults now mirror train_gpt.py on a single process.
+    iterations: int = int(os.environ.get("ITERATIONS", 20_000))
+    val_loss_every: int = int(os.environ.get("VAL_LOSS_EVERY", 0))
+    # Validation always uses the full fineweb_val split. Keep VAL_BATCH_SIZE as a
+    # legacy alias, but do not tie validation throughput to grad accumulation.
+    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
+    val_max_batch_tokens: int = int(os.environ.get("VAL_MAX_BATCH_TOKENS", os.environ.get("VAL_BATCH_SIZE", 524_288)))
+    train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
+    grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
+    train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", os.environ.get("TRAIN_MAX_SEQ_LEN", 1024)))
+    # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
+    # memory pressure without changing the effective optimizer batch.
+    mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
+    warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
+    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
+    max_wallclock_seconds: float = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
+
+    # Model (defaults match the current baseline setup).
+    vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
+    num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
+    shared_core_blocks: int = int(os.environ.get("SHARED_CORE_BLOCKS", "0"))
+    shared_core_schedule: str = os.environ.get("SHARED_CORE_SCHEDULE", "cyclic").strip().lower()
+    shared_core_custom_schedule: str = os.environ.get("SHARED_CORE_CUSTOM_SCHEDULE", "").strip().upper()
+    shared_core_role_gains: str = os.environ.get("SHARED_CORE_ROLE_GAINS", "").strip()
+    shared_core_pass_x0: bool = bool(int(os.environ.get("SHARED_CORE_PASS_X0", "0")))
+    shared_core_revisit_gain: bool = bool(int(os.environ.get("SHARED_CORE_REVISIT_GAIN", "0")))
+    shared_core_revisit_count_gain: bool = bool(int(os.environ.get("SHARED_CORE_REVISIT_COUNT_GAIN", "0")))
+    shared_core_phase_split_revisit_gain: bool = bool(int(os.environ.get("SHARED_CORE_PHASE_SPLIT_REVISIT_GAIN", "0")))
+    shared_core_revisit_damping: float = float(os.environ.get("SHARED_CORE_REVISIT_DAMPING", 0.0))
+    shared_core_correct_block: str = os.environ.get("SHARED_CORE_CORRECT_BLOCK", "").strip().upper()
+    shared_core_correct_gain: float = float(os.environ.get("SHARED_CORE_CORRECT_GAIN", 0.0))
+    shared_core_adaptive_correct: bool = bool(int(os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT", "0")))
+    shared_core_adaptive_correct_block: str = os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_BLOCK", "C").strip().upper()
+    shared_core_adaptive_correct_sources: str = os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_SOURCES", "AB").strip().upper()
+    shared_core_adaptive_correct_max_gain: float = float(os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_MAX_GAIN", 0.0))
+    shared_core_adaptive_correct_target_amp: float = float(os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_TARGET_AMP", 1.1))
+    shared_core_adaptive_correct_log_band: float = float(os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_LOG_BAND", 0.35))
+    shared_core_adaptive_correct_revisit_only: bool = bool(int(os.environ.get("SHARED_CORE_ADAPTIVE_CORRECT_REVISIT_ONLY", "1")))
+    shared_core_directional_correct: bool = bool(int(os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT", "0")))
+    shared_core_directional_correct_block: str = os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_BLOCK", "C").strip().upper()
+    shared_core_directional_correct_sources: str = os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_SOURCES", "AB").strip().upper()
+    shared_core_directional_correct_max_gain: float = float(os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_MAX_GAIN", 0.0))
+    shared_core_directional_correct_target_amp: float = float(os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_TARGET_AMP", 1.1))
+    shared_core_directional_correct_log_band: float = float(os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_LOG_BAND", 0.35))
+    shared_core_directional_correct_revisit_only: bool = bool(int(os.environ.get("SHARED_CORE_DIRECTIONAL_CORRECT_REVISIT_ONLY", "1")))
+    shared_core_directional_stress_guard: bool = bool(int(os.environ.get("SHARED_CORE_DIRECTIONAL_STRESS_GUARD", "0")))
+    shared_core_directional_stress_band: float = float(os.environ.get("SHARED_CORE_DIRECTIONAL_STRESS_BAND", 0.02))
+    shared_core_directional_stress_min_factor: float = float(os.environ.get("SHARED_CORE_DIRECTIONAL_STRESS_MIN_FACTOR", 0.5))
+    shared_core_orbit_gate: bool = bool(int(os.environ.get("SHARED_CORE_ORBIT_GATE", "0")))
+    shared_core_orbit_gate_block: str = os.environ.get("SHARED_CORE_ORBIT_GATE_BLOCK", "C").strip().upper()
+    shared_core_orbit_gate_steps: int = int(os.environ.get("SHARED_CORE_ORBIT_GATE_STEPS", 3))
+    shared_core_orbit_gate_revisit_only: bool = bool(int(os.environ.get("SHARED_CORE_ORBIT_GATE_REVISIT_ONLY", "1")))
+    shared_core_attractor_pulse: bool = bool(int(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE", "0")))
+    shared_core_attractor_pulse_block: str = os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_BLOCK", "C").strip().upper()
+    shared_core_attractor_pulse_steps: int = int(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_STEPS", 2))
+    shared_core_attractor_pulse_gain: float = float(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_GAIN", 0.0))
+    shared_core_attractor_pulse_trigger_amp: float = float(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_TRIGGER_AMP", 2.0))
+    shared_core_attractor_pulse_margin: float = float(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_MARGIN", 0.0))
+    shared_core_attractor_pulse_revisit_only: bool = bool(int(os.environ.get("SHARED_CORE_ATTRACTOR_PULSE_REVISIT_ONLY", "1")))
+    _shared_core_mirror_cancel_env: str = os.environ.get(
+        "SHARED_CORE_MIRROR_CANCEL",
+        os.environ.get("SHARED_CORE_MIRROR_TRIGGER", "0"),
+    )
+    shared_core_mirror_cancel: bool = bool(int(_shared_core_mirror_cancel_env))
+    shared_core_mirror_cancel_block: str = os.environ.get(
+        "SHARED_CORE_MIRROR_CANCEL_BLOCK",
+        os.environ.get("SHARED_CORE_MIRROR_TRIGGER_BLOCK", "C"),
+    ).strip().upper()
+    shared_core_mirror_cancel_threshold: float = float(
+        os.environ.get(
+            "SHARED_CORE_MIRROR_CANCEL_THRESHOLD",
+            os.environ.get("SHARED_CORE_MIRROR_TRIGGER_THRESHOLD", 0.25),
+        )
+    )
+    shared_core_mirror_cancel_revisit_only: bool = bool(
+        int(
+            os.environ.get(
+                "SHARED_CORE_MIRROR_CANCEL_REVISIT_ONLY",
+                os.environ.get("SHARED_CORE_MIRROR_TRIGGER_REVISIT_ONLY", "1"),
+            )
+        )
+    )
+    shared_core_stabilize_every: int = int(os.environ.get("SHARED_CORE_STABILIZE_EVERY", 0))
+    shared_core_stabilize_after: int = int(os.environ.get("SHARED_CORE_STABILIZE_AFTER", 0))
+    shared_core_stabilize_gain: float = float(os.environ.get("SHARED_CORE_STABILIZE_GAIN", 0.0))
+    model_dim: int = int(os.environ.get("MODEL_DIM", 512))
+    num_heads: int = int(os.environ.get("NUM_HEADS", 8))
+    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
+    mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
+    tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
+    tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
+    logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
+    logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
+    rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
+    qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
+
+    # Optimizer. We keep the same per-group defaults as train_gpt.py.
+    beta1: float = float(os.environ.get("BETA1", 0.9))
+    beta2: float = float(os.environ.get("BETA2", 0.95))
+    adam_eps: float = float(os.environ.get("ADAM_EPS", 1e-8))
+    tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.05))
+    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.04))
+    scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.04))
+    muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.95))
+    muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
+    muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
+    muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
+    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    verify_quantized_roundtrip: bool = bool(int(os.environ.get("VERIFY_QUANTIZED_ROUNDTRIP", "1")))
+
+    out_dir: str = os.environ.get("OUT_DIR", "logs")
+
+    @property
+    def train_files(self) -> str:
+        return f"{self.data_path}/fineweb_train_*.bin"
+
+    @property
+    def val_files(self) -> str:
+        return f"{self.data_path}/fineweb_val_*.bin"
+
+    @property
+    def microbatch_tokens(self) -> int:
+        return self.train_batch_tokens // self.grad_accum_steps
+
+    def lr_mul(self, step: int, elapsed_ms: float) -> float:
+        if self.warmdown_iters <= 0:
+            return 1.0
+        if self.max_wallclock_seconds <= 0:
+            warmdown_start = max(self.iterations - self.warmdown_iters, 0)
+            return max((self.iterations - step) / max(self.warmdown_iters, 1), 0.0) if warmdown_start <= step < self.iterations else 1.0
+        step_ms = elapsed_ms / max(step, 1)
+        warmdown_ms = self.warmdown_iters * step_ms
+        remaining_ms = max(1000.0 * self.max_wallclock_seconds - elapsed_ms, 0.0)
+        return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+
+
+CONTROL_TENSOR_NAME_PATTERNS = tuple(
+    pattern
+    for pattern in os.environ.get(
+        "CONTROL_TENSOR_NAME_PATTERNS",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,step_scale,step_scales,pass_x0_scale,pass_x0_scales,revisit_gain,revisit_gains,revisit_count_gain,revisit_count_gains,revisit_gains_encoder,revisit_gains_decoder",
+    ).split(",")
+    if pattern
+)
+INT8_KEEP_FLOAT_FP32_NAME_PATTERNS = tuple(
+    pattern
+    for pattern in os.environ.get(
+        "INT8_KEEP_FLOAT_FP32_NAME_PATTERNS",
+        ",".join(CONTROL_TENSOR_NAME_PATTERNS),
+    ).split(",")
+    if pattern
+)
+
+
+def token_chunks(total_tokens: int, seq_len: int, max_chunk_tokens: int) -> list[int]:
+    usable_total = (total_tokens // seq_len) * seq_len
+    if usable_total <= 0:
+        raise ValueError(f"token budget too small for seq_len={seq_len}")
+    usable_chunk = max((max_chunk_tokens // seq_len) * seq_len, seq_len)
+    chunks: list[int] = []
+    remaining = usable_total
+    while remaining > 0:
+        chunk = min(remaining, usable_chunk)
+        chunks.append(chunk)
+        remaining -= chunk
+    return chunks
+
+
+def accumulate_flat_grads(
+    accum: dict[str, mx.array] | None,
+    flat_grads: dict[str, mx.array],
+    scale: float,
+) -> dict[str, mx.array]:
+    if accum is None:
+        return {k: g * scale for k, g in flat_grads.items()}
+    for k, g in flat_grads.items():
+        accum[k] = accum[k] + g * scale
+    return accum
+
+
+def effective_val_batch_tokens(args: Hyperparameters) -> int:
+    tokens = (args.val_max_batch_tokens // args.train_seq_len) * args.train_seq_len
+    if tokens < args.train_seq_len:
+        raise ValueError(
+            "VAL_MAX_BATCH_TOKENS must provide at least one sequence; "
+            f"got VAL_MAX_BATCH_TOKENS={args.val_max_batch_tokens}, TRAIN_SEQ_LEN={args.train_seq_len}"
+        )
+    return tokens
+
+
+# ==============================================================================
+# MATH HELPERS
+# ==============================================================================
+
+def rms_norm(x: mx.array, eps: float = 1e-6) -> mx.array:
+    return mx.fast.rms_norm(x, None, eps).astype(x.dtype)
+
+
+def zeropower_newtonschulz5(g: mx.array, steps: int, eps: float = 1e-7) -> mx.array:
+    # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
+    # Muon uses this to normalize matrix-shaped gradients before applying them.
+    # Background on Muon: https://kellerjordan.github.io/posts/muon/
+    a, b, c = 3.4445, -4.7750, 2.0315
+    x = g.astype(mx.float32)
+    x = x / (mx.sqrt(mx.sum(x * x)) + eps)
+    transposed = x.shape[0] > x.shape[1]
+    if transposed:
+        x = x.T
+    for _ in range(steps):
+        a_mat = x @ x.T
+        b_mat = b * a_mat + c * (a_mat @ a_mat)
+        x = a * x + b_mat @ x
+    if transposed:
+        x = x.T
+    return x.astype(g.dtype)
+
+
+def load_data_shard(path: Path) -> np.ndarray:
+    header_bytes = 256 * np.dtype("<i4").itemsize
+    token_bytes = np.dtype("<u2").itemsize
+    header = np.fromfile(path, dtype="<i4", count=256)
+    if header.size != 256 or int(header[0]) != 20240520 or int(header[1]) != 1:
+        raise ValueError(f"Unexpected shard header for {path}")
+    num_tokens = int(header[2])
+    if path.stat().st_size != header_bytes + num_tokens * token_bytes:
+        raise ValueError(f"Shard size mismatch for {path}")
+    tokens = np.fromfile(path, dtype="<u2", count=num_tokens, offset=header_bytes)
+    if tokens.size != num_tokens:
+        raise ValueError(f"Short read for {path}")
+    return tokens.astype(np.int32, copy=False)
+
+
+# ==============================================================================
+# TOKEN STREAMING / BATCHING
+# ==============================================================================
+
+
+class TokenStream:
+    def __init__(
+        self,
+        pattern: str,
+        log_fn: Callable[[str], None] | None = None,
+        dataset_name: str = "",
+    ):
+        self.files = [Path(p) for p in sorted(glob.glob(pattern))]
+        if not self.files:
+            raise FileNotFoundError(f"No files found for pattern: {pattern}")
+        self.epoch = 1
+        self.file_idx = 0
+        self.log_fn = log_fn
+        self.dataset_name = dataset_name
+        self.tokens = load_data_shard(self.files[0])
+        self.pos = 0
+
+    def next_file(self) -> None:
+        self.file_idx = (self.file_idx + 1) % len(self.files)
+        if self.file_idx == 0:
+            self.epoch += 1
+            if self.log_fn is not None:
+                self.log_fn(
+                    f"WARNING: starting epoch:{self.epoch} "
+                    f"dataset:{self.dataset_name} train_shards:{len(self.files)}"
+                )
+        self.tokens = load_data_shard(self.files[self.file_idx])
+        self.pos = 0
+
+    def take(self, n: int) -> np.ndarray:
+        chunks: list[np.ndarray] = []
+        left = n
+        while left > 0:
+            if self.pos >= self.tokens.size:
+                self.next_file()
+            k = min(left, int(self.tokens.size - self.pos))
+            chunks.append(self.tokens[self.pos : self.pos + k])
+            self.pos += k
+            left -= k
+        return chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
+
+
+class TokenLoader:
+    def __init__(
+        self,
+        pattern: str,
+        log_fn: Callable[[str], None] | None = None,
+        dataset_name: str = "",
+    ):
+        self.stream = TokenStream(pattern, log_fn=log_fn, dataset_name=dataset_name)
+
+    def next_batch(self, batch_tokens: int, seq_len: int) -> tuple[mx.array, mx.array]:
+        usable = (batch_tokens // seq_len) * seq_len
+        if usable <= 0:
+            raise ValueError(f"token budget too small for seq_len={seq_len}")
+        chunk = self.stream.take(usable + 1)
+        x = chunk[:-1].reshape(-1, seq_len)
+        y = chunk[1:].reshape(-1, seq_len)
+        return mx.array(x, dtype=mx.int32), mx.array(y, dtype=mx.int32)
+
+
+# ==============================================================================
+# MODEL BLOCKS
+# ==============================================================================
+
+class CastedLinear(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.weight = nn.Linear(in_dim, out_dim, bias=False).weight.astype(mx.float32)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return x @ self.weight.astype(x.dtype).T
+
+
+class RMSNormNoWeight(nn.Module):
+    # MLX module wrapper around the functional RMSNorm helper so it composes nicely in blocks.
+    def __call__(self, x: mx.array) -> mx.array:
+        return rms_norm(x)
+
+
+class CausalSelfAttention(nn.Module):
+    # - separate q/k/v projections
+    # - RMSNorm on q and k before attention
+    # - RoPE on q and k
+    # - causal masked SDPA
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_base: float,
+        qk_gain_init: float,
+    ):
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = dim // num_heads
+        if self.head_dim % 2 != 0:
+            raise ValueError("head_dim must be even for RoPE")
+        kv_dim = self.num_kv_heads * self.head_dim
+        self.c_q = CastedLinear(dim, dim)
+        self.c_k = CastedLinear(dim, kv_dim)
+        self.c_v = CastedLinear(dim, kv_dim)
+        self.proj = CastedLinear(dim, dim)
+        self.q_gain = mx.ones((num_heads,), dtype=mx.float32) * qk_gain_init
+        self.rope = nn.RoPE(self.head_dim, traditional=False, base=rope_base)
+        self.scale = self.head_dim ** -0.5
+
+    def __call__(self, x: mx.array) -> mx.array:
+        bsz, seqlen, dim = x.shape
+        q = self.c_q(x).reshape(bsz, seqlen, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
+        k = self.c_k(x).reshape(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v = self.c_v(x).reshape(bsz, seqlen, self.num_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
+
+        q = self.rope(rms_norm(q).astype(COMPUTE_DTYPE))
+        k = self.rope(rms_norm(k).astype(COMPUTE_DTYPE))
+        q = q * self.q_gain.astype(q.dtype)[None, :, None, None]
+        y = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
+        y = y.transpose(0, 2, 1, 3).reshape(bsz, seqlen, dim)
+        return self.proj(y)
+
+
+class MLP(nn.Module):
+    # Baseline MLP uses relu^2 instead of GELU/SiLU. It is cheap and works well in this setup.
+    def __init__(self, dim: int, mlp_mult: int):
+        super().__init__()
+        hidden = dim * mlp_mult
+        self.fc = CastedLinear(dim, hidden)
+        self.proj = CastedLinear(hidden, dim)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.proj(nn.relu2(self.fc(x)))
+
+
+class Block(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mlp_mult: int,
+        rope_base: float,
+        qk_gain_init: float,
+    ):
+        super().__init__()
+        self.attn_norm = RMSNormNoWeight()
+        self.mlp_norm = RMSNormNoWeight()
+        self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
+        self.mlp = MLP(dim, mlp_mult)
+        self.attn_scale = mx.ones((dim,), dtype=mx.float32)
+        self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
+        self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
+
+    def __call__(self, x: mx.array, x0: mx.array) -> mx.array:
+        mix = self.resid_mix.astype(x.dtype)
+        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        attn_out = self.attn(self.attn_norm(x))
+        x = x + self.attn_scale.astype(x.dtype)[None, None, :] * attn_out
+        x = x + self.mlp_scale.astype(x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
+        return x
+
+
+class GPT(nn.Module):
+    # - token embedding + RMSNorm
+    # - encoder half accumulates skip tensors
+    # - decoder half consumes reversed skips with learned skip_weights
+    # - tied embeddings for the LM head (the baseline default setup)
+    def __init__(self, vocab_size: int, num_layers: int, shared_core_blocks: int, shared_core_schedule: str,
+                 shared_core_custom_schedule: str, shared_core_role_gains: str, shared_core_pass_x0: bool,
+                 shared_core_revisit_gain: bool, shared_core_revisit_count_gain: bool,
+                 shared_core_phase_split_revisit_gain: bool, shared_core_revisit_damping: float,
+                 shared_core_correct_block: str, shared_core_correct_gain: float,
+                 shared_core_adaptive_correct: bool, shared_core_adaptive_correct_block: str,
+                 shared_core_adaptive_correct_sources: str, shared_core_adaptive_correct_max_gain: float,
+                 shared_core_adaptive_correct_target_amp: float, shared_core_adaptive_correct_log_band: float,
+                 shared_core_adaptive_correct_revisit_only: bool,
+                 shared_core_directional_correct: bool, shared_core_directional_correct_block: str,
+                 shared_core_directional_correct_sources: str, shared_core_directional_correct_max_gain: float,
+                 shared_core_directional_correct_target_amp: float, shared_core_directional_correct_log_band: float,
+                 shared_core_directional_correct_revisit_only: bool,
+                 shared_core_directional_stress_guard: bool, shared_core_directional_stress_band: float,
+                 shared_core_directional_stress_min_factor: float,
+                 shared_core_orbit_gate: bool, shared_core_orbit_gate_block: str,
+                 shared_core_orbit_gate_steps: int, shared_core_orbit_gate_revisit_only: bool,
+                 shared_core_attractor_pulse: bool, shared_core_attractor_pulse_block: str,
+                 shared_core_attractor_pulse_steps: int, shared_core_attractor_pulse_gain: float,
+                 shared_core_attractor_pulse_trigger_amp: float, shared_core_attractor_pulse_margin: float,
+                 shared_core_attractor_pulse_revisit_only: bool,
+                 shared_core_mirror_cancel: bool, shared_core_mirror_cancel_block: str,
+                 shared_core_mirror_cancel_threshold: float, shared_core_mirror_cancel_revisit_only: bool,
+                 shared_core_stabilize_every: int, shared_core_stabilize_after: int,
+                 shared_core_stabilize_gain: float,
+                 dim: int, num_heads: int,
+                 num_kv_heads: int, mlp_mult: int,
+                 logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
+                 qk_gain_init: float):
+        super().__init__()
+        if logit_softcap <= 0.0:
+            raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        if shared_core_blocks <= 0:
+            shared_core_blocks = num_layers
+        if shared_core_blocks > num_layers:
+            raise ValueError(
+                f"shared_core_blocks must be in [1, num_layers], got {shared_core_blocks} for num_layers={num_layers}"
+            )
+        if shared_core_schedule not in {"cyclic", "mirror", "custom"}:
+            raise ValueError(f"shared_core_schedule must be 'cyclic', 'mirror', or 'custom', got {shared_core_schedule!r}")
+        base_revisit_gain_requested = shared_core_revisit_gain and not shared_core_phase_split_revisit_gain
+        phase_split_requested = shared_core_phase_split_revisit_gain
+        count_gain_requested = shared_core_revisit_count_gain
+        if int(base_revisit_gain_requested) + int(phase_split_requested) + int(count_gain_requested) > 1:
+            raise ValueError("choose at most one revisit-gain mode: base, phase-split, or count-indexed")
+        self.logit_chunk_tokens = logit_chunk_tokens
+        self.logit_softcap = logit_softcap
+        self.num_layers = num_layers
+        self.num_unique_blocks = shared_core_blocks
+        self.shared_core_enabled = self.num_unique_blocks < self.num_layers
+        self.shared_core_schedule = shared_core_schedule
+        self.shared_core_custom_schedule = shared_core_custom_schedule
+        role_gain_values: list[float] = []
+        if shared_core_role_gains:
+            role_gain_values = [float(part.strip()) for part in shared_core_role_gains.split(",") if part.strip()]
+            if len(role_gain_values) != self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_ROLE_GAINS must provide {self.num_unique_blocks} comma-separated values, "
+                    f"got {len(role_gain_values)} from {shared_core_role_gains!r}"
+                )
+        self.shared_core_pass_x0 = shared_core_pass_x0 and self.shared_core_enabled
+        self.shared_core_revisit_gain = base_revisit_gain_requested and self.shared_core_enabled
+        self.shared_core_revisit_count_gain = count_gain_requested and self.shared_core_enabled
+        self.shared_core_phase_split_revisit_gain = phase_split_requested and self.shared_core_enabled
+        if self.shared_core_schedule == "custom":
+            if not self.shared_core_custom_schedule:
+                raise ValueError("SHARED_CORE_CUSTOM_SCHEDULE is required when SHARED_CORE_SCHEDULE=custom")
+            if len(self.shared_core_custom_schedule) != self.num_layers:
+                raise ValueError(
+                    f"SHARED_CORE_CUSTOM_SCHEDULE length must equal num_layers={self.num_layers}, got {len(self.shared_core_custom_schedule)}"
+                )
+            if any(not ("A" <= ch <= "Z") for ch in self.shared_core_custom_schedule):
+                raise ValueError(f"SHARED_CORE_CUSTOM_SCHEDULE must contain only A-Z letters, got {self.shared_core_custom_schedule!r}")
+            max_block_idx = max(ord(ch) - ord("A") for ch in self.shared_core_custom_schedule)
+            if max_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_CUSTOM_SCHEDULE references block index {max_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+        revisit_mode_enabled = (
+            self.shared_core_revisit_gain
+            or self.shared_core_revisit_count_gain
+            or self.shared_core_phase_split_revisit_gain
+        )
+        self.shared_core_revisit_damping = max(min(float(shared_core_revisit_damping), 1.0), 0.0) if revisit_mode_enabled else 0.0
+        self.role_gains = (
+            mx.array(role_gain_values, dtype=mx.float32)
+            if self.shared_core_enabled and role_gain_values
+            else None
+        )
+        correct_block_idx: int | None = None
+        if shared_core_correct_block:
+            if len(shared_core_correct_block) != 1 or not ("A" <= shared_core_correct_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_CORRECT_BLOCK must be a single A-Z letter, got {shared_core_correct_block!r}"
+                )
+            correct_block_idx = ord(shared_core_correct_block) - ord("A")
+            if correct_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_CORRECT_BLOCK={shared_core_correct_block!r} maps to block index {correct_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+        self.shared_core_correct_block_idx = correct_block_idx if self.shared_core_enabled else None
+        self.shared_core_correct_gain = (
+            max(min(float(shared_core_correct_gain), 1.0), 0.0)
+            if self.shared_core_correct_block_idx is not None
+            else 0.0
+        )
+        self.shared_core_adaptive_correct = False
+        self.shared_core_adaptive_correct_block_idx: int | None = None
+        self.shared_core_adaptive_correct_sources = ""
+        self.shared_core_adaptive_correct_max_gain = 0.0
+        self.shared_core_adaptive_correct_target_amp = 1.0
+        self.shared_core_adaptive_correct_target_log_amp = 0.0
+        self.shared_core_adaptive_correct_log_band = 1.0
+        self.shared_core_adaptive_correct_revisit_only = bool(shared_core_adaptive_correct_revisit_only)
+        if shared_core_adaptive_correct and self.shared_core_enabled:
+            adaptive_block = shared_core_adaptive_correct_block or "C"
+            if len(adaptive_block) != 1 or not ("A" <= adaptive_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_ADAPTIVE_CORRECT_BLOCK must be a single A-Z letter, got {adaptive_block!r}"
+                )
+            adaptive_block_idx = ord(adaptive_block) - ord("A")
+            if adaptive_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_ADAPTIVE_CORRECT_BLOCK={adaptive_block!r} maps to block index {adaptive_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+            adaptive_sources = [ch for ch in shared_core_adaptive_correct_sources if "A" <= ch <= "Z"]
+            if len(adaptive_sources) != 2:
+                raise ValueError(
+                    "SHARED_CORE_ADAPTIVE_CORRECT_SOURCES must contain exactly two block letters, "
+                    f"got {shared_core_adaptive_correct_sources!r}"
+                )
+            adaptive_source_indices = tuple(ord(ch) - ord("A") for ch in adaptive_sources)
+            if any(idx >= self.num_unique_blocks for idx in adaptive_source_indices):
+                raise ValueError(
+                    f"SHARED_CORE_ADAPTIVE_CORRECT_SOURCES={shared_core_adaptive_correct_sources!r} references "
+                    f"block index >= shared_core_blocks={self.num_unique_blocks}"
+                )
+            self.shared_core_adaptive_correct = max(float(shared_core_adaptive_correct_max_gain), 0.0) > 0.0
+            if self.shared_core_adaptive_correct:
+                self.shared_core_adaptive_correct_block_idx = adaptive_block_idx
+                self.shared_core_adaptive_correct_sources = "".join(adaptive_sources)
+                self.shared_core_adaptive_correct_max_gain = max(min(float(shared_core_adaptive_correct_max_gain), 1.0), 0.0)
+                self.shared_core_adaptive_correct_target_amp = max(float(shared_core_adaptive_correct_target_amp), 1e-6)
+                self.shared_core_adaptive_correct_target_log_amp = math.log(self.shared_core_adaptive_correct_target_amp)
+                self.shared_core_adaptive_correct_log_band = max(float(shared_core_adaptive_correct_log_band), 1e-6)
+        self.shared_core_directional_correct = False
+        self.shared_core_directional_correct_block_idx: int | None = None
+        self.shared_core_directional_correct_sources = ""
+        self.shared_core_directional_correct_max_gain = 0.0
+        self.shared_core_directional_correct_target_amp = 1.0
+        self.shared_core_directional_correct_target_log_amp = 0.0
+        self.shared_core_directional_correct_log_band = 1.0
+        self.shared_core_directional_correct_revisit_only = bool(shared_core_directional_correct_revisit_only)
+        self.shared_core_directional_stress_guard = False
+        self.shared_core_directional_stress_band = 1.0
+        self.shared_core_directional_stress_min_factor = 1.0
+        if shared_core_directional_correct and self.shared_core_enabled:
+            directional_block = shared_core_directional_correct_block or "C"
+            if len(directional_block) != 1 or not ("A" <= directional_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_DIRECTIONAL_CORRECT_BLOCK must be a single A-Z letter, got {directional_block!r}"
+                )
+            directional_block_idx = ord(directional_block) - ord("A")
+            if directional_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_DIRECTIONAL_CORRECT_BLOCK={directional_block!r} maps to block index {directional_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+            directional_sources = [ch for ch in shared_core_directional_correct_sources if "A" <= ch <= "Z"]
+            if len(directional_sources) != 2:
+                raise ValueError(
+                    "SHARED_CORE_DIRECTIONAL_CORRECT_SOURCES must contain exactly two block letters, "
+                    f"got {shared_core_directional_correct_sources!r}"
+                )
+            directional_source_indices = tuple(ord(ch) - ord("A") for ch in directional_sources)
+            if any(idx >= self.num_unique_blocks for idx in directional_source_indices):
+                raise ValueError(
+                    f"SHARED_CORE_DIRECTIONAL_CORRECT_SOURCES={shared_core_directional_correct_sources!r} references "
+                    f"block index >= shared_core_blocks={self.num_unique_blocks}"
+                )
+            self.shared_core_directional_correct = max(float(shared_core_directional_correct_max_gain), 0.0) > 0.0
+            if self.shared_core_directional_correct:
+                self.shared_core_directional_correct_block_idx = directional_block_idx
+                self.shared_core_directional_correct_sources = "".join(directional_sources)
+                self.shared_core_directional_correct_max_gain = max(min(float(shared_core_directional_correct_max_gain), 1.0), 0.0)
+                self.shared_core_directional_correct_target_amp = max(float(shared_core_directional_correct_target_amp), 1e-6)
+                self.shared_core_directional_correct_target_log_amp = math.log(self.shared_core_directional_correct_target_amp)
+                self.shared_core_directional_correct_log_band = max(float(shared_core_directional_correct_log_band), 1e-6)
+                self.shared_core_directional_stress_guard = bool(shared_core_directional_stress_guard)
+                self.shared_core_directional_stress_band = max(float(shared_core_directional_stress_band), 1e-6)
+                self.shared_core_directional_stress_min_factor = max(
+                    min(float(shared_core_directional_stress_min_factor), 1.0),
+                    0.0,
+                )
+        self.shared_core_orbit_gate = False
+        self.shared_core_orbit_gate_block_idx: int | None = None
+        self.shared_core_orbit_gate_steps = 1
+        self.shared_core_orbit_gate_revisit_only = bool(shared_core_orbit_gate_revisit_only)
+        if shared_core_orbit_gate and self.shared_core_enabled:
+            orbit_block = shared_core_orbit_gate_block or "C"
+            if len(orbit_block) != 1 or not ("A" <= orbit_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_ORBIT_GATE_BLOCK must be a single A-Z letter, got {orbit_block!r}"
+                )
+            orbit_block_idx = ord(orbit_block) - ord("A")
+            if orbit_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_ORBIT_GATE_BLOCK={orbit_block!r} maps to block index {orbit_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+            self.shared_core_orbit_gate = max(int(shared_core_orbit_gate_steps), 0) > 0
+            if self.shared_core_orbit_gate:
+                self.shared_core_orbit_gate_block_idx = orbit_block_idx
+                self.shared_core_orbit_gate_steps = max(int(shared_core_orbit_gate_steps), 1)
+        self.shared_core_attractor_pulse = False
+        self.shared_core_attractor_pulse_block_idx: int | None = None
+        self.shared_core_attractor_pulse_steps = 1
+        self.shared_core_attractor_pulse_gain = 0.0
+        self.shared_core_attractor_pulse_trigger_amp = float("inf")
+        self.shared_core_attractor_pulse_margin = 0.0
+        self.shared_core_attractor_pulse_revisit_only = bool(shared_core_attractor_pulse_revisit_only)
+        if shared_core_attractor_pulse and self.shared_core_enabled:
+            pulse_block = shared_core_attractor_pulse_block or "C"
+            if len(pulse_block) != 1 or not ("A" <= pulse_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_ATTRACTOR_PULSE_BLOCK must be a single A-Z letter, got {pulse_block!r}"
+                )
+            pulse_block_idx = ord(pulse_block) - ord("A")
+            if pulse_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_ATTRACTOR_PULSE_BLOCK={pulse_block!r} maps to block index {pulse_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+            pulse_gain = max(min(float(shared_core_attractor_pulse_gain), 1.0), 0.0)
+            pulse_steps = max(int(shared_core_attractor_pulse_steps), 0)
+            self.shared_core_attractor_pulse = pulse_gain > 0.0 and pulse_steps > 0
+            if self.shared_core_attractor_pulse:
+                self.shared_core_attractor_pulse_block_idx = pulse_block_idx
+                self.shared_core_attractor_pulse_steps = pulse_steps
+                self.shared_core_attractor_pulse_gain = pulse_gain
+                self.shared_core_attractor_pulse_trigger_amp = max(float(shared_core_attractor_pulse_trigger_amp), 1.0)
+                self.shared_core_attractor_pulse_margin = float(shared_core_attractor_pulse_margin)
+        self.shared_core_mirror_cancel = False
+        self.shared_core_mirror_cancel_block_idx: int | None = None
+        self.shared_core_mirror_cancel_threshold = float("inf")
+        self.shared_core_mirror_cancel_revisit_only = bool(shared_core_mirror_cancel_revisit_only)
+        if shared_core_mirror_cancel and self.shared_core_enabled and self.shared_core_schedule == "mirror":
+            mirror_block = shared_core_mirror_cancel_block or "C"
+            if len(mirror_block) != 1 or not ("A" <= mirror_block <= "Z"):
+                raise ValueError(
+                    f"SHARED_CORE_MIRROR_CANCEL_BLOCK must be a single A-Z letter, got {mirror_block!r}"
+                )
+            mirror_block_idx = ord(mirror_block) - ord("A")
+            if mirror_block_idx >= self.num_unique_blocks:
+                raise ValueError(
+                    f"SHARED_CORE_MIRROR_CANCEL_BLOCK={mirror_block!r} maps to block index {mirror_block_idx}, "
+                    f"but shared_core_blocks={self.num_unique_blocks}"
+                )
+            self.shared_core_mirror_cancel = True
+            self.shared_core_mirror_cancel_block_idx = mirror_block_idx
+            self.shared_core_mirror_cancel_threshold = max(float(shared_core_mirror_cancel_threshold), 0.0)
+        stabilize_gain = max(min(float(shared_core_stabilize_gain), 1.0), 0.0)
+        self.shared_core_stabilize_every = (
+            max(int(shared_core_stabilize_every), 0)
+            if self.shared_core_enabled and stabilize_gain > 0.0
+            else 0
+        )
+        self.shared_core_stabilize_after = max(int(shared_core_stabilize_after), 0)
+        self.shared_core_stabilize_gain = stabilize_gain if self.shared_core_stabilize_every > 0 else 0.0
+
+        self.tok_emb = nn.Embedding(vocab_size, dim)
+        self.num_encoder_layers = num_layers // 2
+        self.num_decoder_layers = num_layers - self.num_encoder_layers
+        self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
+        self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        self.blocks = [
+            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            for _ in range(self.num_unique_blocks)
+        ]
+        self.step_scales = mx.ones((num_layers,), dtype=mx.float32) if self.shared_core_enabled else None
+        self.pass_x0_scales = mx.ones((num_layers,), dtype=mx.float32) if self.shared_core_pass_x0 else None
+        self.revisit_gains = (
+            mx.ones((self.num_unique_blocks,), dtype=mx.float32)
+            if self.shared_core_revisit_gain
+            else None
+        )
+        self.revisit_count_gains = (
+            mx.ones((self.max_revisit_count(),), dtype=mx.float32)
+            if self.shared_core_revisit_count_gain
+            else None
+        )
+        self.revisit_gains_encoder = (
+            mx.ones((self.num_unique_blocks,), dtype=mx.float32)
+            if self.shared_core_phase_split_revisit_gain
+            else None
+        )
+        self.revisit_gains_decoder = (
+            mx.ones((self.num_unique_blocks,), dtype=mx.float32)
+            if self.shared_core_phase_split_revisit_gain
+            else None
+        )
+        self.final_norm = RMSNormNoWeight()
+
+        for b in self.blocks:
+            b.attn.proj.weight = mx.zeros_like(b.attn.proj.weight)
+            b.mlp.proj.weight = mx.zeros_like(b.mlp.proj.weight)
+        self.tok_emb.weight = (
+            mx.random.normal(self.tok_emb.weight.shape, dtype=mx.float32) * tied_embed_init_std
+        ).astype(COMPUTE_DTYPE)
+
+    def softcap(self, logits: mx.array) -> mx.array:
+        c = self.logit_softcap
+        return c * mx.tanh(logits / c)
+
+    def apply_block(self, layer_idx: int, x: mx.array, x0: mx.array) -> mx.array:
+        x0_block = x0 if self.pass_x0_scales is None else self.pass_x0_scales[layer_idx].astype(x.dtype) * x0
+        block_idx = self.block_index(layer_idx)
+        x_next = self.blocks[block_idx](x, x0_block)
+        if self.step_scales is None:
+            return x_next
+        step_scale = self.step_scales[layer_idx].astype(x.dtype)
+        if self.role_gains is not None:
+            step_scale = step_scale * self.role_gains[block_idx].astype(x.dtype)
+        revisit_gain = self.revisit_gain_for_layer(layer_idx, block_idx)
+        if revisit_gain is not None:
+            step_scale = step_scale * revisit_gain.astype(x.dtype)
+        return x + step_scale * (x_next - x)
+
+    def block_index(self, layer_idx: int) -> int:
+        if not self.shared_core_enabled:
+            return layer_idx
+        if self.shared_core_schedule == "custom":
+            return ord(self.shared_core_custom_schedule[layer_idx]) - ord("A")
+        if self.shared_core_schedule == "cyclic" or self.num_unique_blocks <= 1:
+            return layer_idx % self.num_unique_blocks
+        period = max(2 * self.num_unique_blocks - 2, 1)
+        pos = layer_idx % period
+        return pos if pos < self.num_unique_blocks else period - pos
+
+    def is_revisit_layer(self, layer_idx: int) -> bool:
+        return self.revisit_count_for_layer(layer_idx) > 0
+
+    def revisit_count_for_layer(self, layer_idx: int) -> int:
+        if not self.shared_core_enabled or layer_idx <= 0:
+            return 0
+        block_idx = self.block_index(layer_idx)
+        return sum(1 for prev_idx in range(layer_idx) if self.block_index(prev_idx) == block_idx)
+
+    def max_revisit_count(self) -> int:
+        if not self.shared_core_enabled:
+            return 0
+        return max((self.revisit_count_for_layer(i) for i in range(self.num_layers)), default=0)
+
+    def mirror_partner_layer(self, layer_idx: int) -> int | None:
+        if self.shared_core_schedule != "mirror":
+            return None
+        partner_idx = self.num_layers - 1 - layer_idx
+        if partner_idx < 0 or partner_idx >= layer_idx:
+            return None
+        return partner_idx
+
+    def revisit_gain_for_layer(self, layer_idx: int, block_idx: int) -> mx.array | None:
+        revisit_count = self.revisit_count_for_layer(layer_idx)
+        if revisit_count <= 0:
+            return None
+        if self.revisit_count_gains is not None:
+            gain = self.revisit_count_gains[revisit_count - 1]
+        elif self.revisit_gains is not None:
+            gain = self.revisit_gains[block_idx]
+        elif self.revisit_gains_encoder is not None and self.revisit_gains_decoder is not None:
+            gain = self.revisit_gains_encoder[block_idx] if layer_idx < self.num_encoder_layers else self.revisit_gains_decoder[block_idx]
+        else:
+            return None
+        if self.shared_core_revisit_damping > 0.0:
+            gain = gain * (1.0 - self.shared_core_revisit_damping)
+        return gain
+
+    def block_letter(self, block_idx: int | None) -> str:
+        return "-" if block_idx is None else chr(ord("A") + block_idx)
+
+    def should_stabilize_layer(self, layer_idx: int) -> bool:
+        if self.shared_core_stabilize_every <= 0 or self.shared_core_stabilize_gain <= 0.0:
+            return False
+        layer_num = layer_idx + 1
+        if layer_num < self.shared_core_stabilize_after:
+            return False
+        return (layer_num - self.shared_core_stabilize_after) % self.shared_core_stabilize_every == 0
+
+    def blend_toward_anchor(self, x: mx.array, anchor: mx.array, gain: float | mx.array) -> mx.array:
+        if isinstance(gain, mx.array):
+            gain_value = gain.astype(x.dtype)
+        elif gain <= 0.0:
+            return x
+        else:
+            gain_value = mx.array(gain, dtype=x.dtype)
+        return x + gain_value * (anchor - x)
+
+    def tokenwise_cosine_mean(self, a: mx.array, b: mx.array) -> mx.array:
+        a32 = a.astype(mx.float32)
+        b32 = b.astype(mx.float32)
+        dots = mx.sum(a32 * b32, axis=-1)
+        a_norm = mx.sqrt(mx.sum(a32 * a32, axis=-1))
+        b_norm = mx.sqrt(mx.sum(b32 * b32, axis=-1))
+        return mx.mean(dots / (a_norm * b_norm + 1e-8))
+
+    def delta_rms(self, delta: mx.array) -> mx.array:
+        delta32 = delta.astype(mx.float32)
+        return mx.sqrt(mx.mean(delta32 * delta32))
+
+    def project_away_mode(self, x: mx.array, anchor: mx.array, mode: mx.array, gain: float | mx.array) -> mx.array:
+        if isinstance(gain, mx.array):
+            gain_value = gain.astype(mx.float32)
+        elif gain <= 0.0:
+            return x
+        else:
+            gain_value = mx.array(gain, dtype=mx.float32)
+        deviation = x.astype(mx.float32) - anchor.astype(mx.float32)
+        mode32 = mode.astype(mx.float32)
+        mode_unit = mode32 / (mx.sqrt(mx.sum(mode32 * mode32, axis=-1, keepdims=True)) + 1e-8)
+        proj = mx.sum(deviation * mode_unit, axis=-1, keepdims=True)
+        corrected = deviation - gain_value * proj * mode_unit
+        return (anchor.astype(mx.float32) + corrected).astype(x.dtype)
+
+    def activation_quant_signature(self, x: mx.array) -> mx.array:
+        x32 = x.astype(mx.float32)
+        clip_abs = mx.maximum(mx.max(mx.abs(x32)), 1.0 / 127.0)
+        scale = clip_abs / 127.0
+        q = mx.clip(mx.round(x32 / scale), -127.0, 127.0)
+        sat_frac = mx.mean((mx.abs(q) >= 127.0).astype(mx.float32))
+        return mx.stack(
+            [
+                mx.round(mx.mean(q)),
+                mx.round(mx.mean(mx.abs(q))),
+                mx.round(1000.0 * sat_frac),
+                mx.round(16.0 * mx.log(scale + 1e-8) / math.log(2.0)),
+            ]
+        ).astype(mx.float32)
+
+    def activation_quant_stress(self, x: mx.array) -> mx.array:
+        x32 = x.astype(mx.float32)
+        clip_abs = mx.maximum(mx.max(mx.abs(x32)), 1.0 / 127.0)
+        scale = clip_abs / 127.0
+        q = mx.clip(mx.round(x32 / scale), -127.0, 127.0)
+        sat_frac = mx.mean((mx.abs(q) >= 127.0).astype(mx.float32))
+        return 8.0 * sat_frac + mx.log(scale + 1e-8) / math.log(2.0)
+
+    def mirror_cancel_metric(
+        self,
+        layer_idx: int,
+        block_idx: int,
+        layer_deltas: list[mx.array],
+        layer_delta_ready: list[bool],
+    ) -> mx.array | None:
+        if not self.shared_core_mirror_cancel:
+            return None
+        if block_idx != self.shared_core_mirror_cancel_block_idx:
+            return None
+        if self.shared_core_mirror_cancel_revisit_only and self.revisit_count_for_layer(layer_idx) <= 0:
+            return None
+        partner_idx = self.mirror_partner_layer(layer_idx)
+        if partner_idx is None or not layer_delta_ready[partner_idx]:
+            return None
+        current_delta = layer_deltas[layer_idx]
+        partner_delta = layer_deltas[partner_idx]
+        residual = self.delta_rms(current_delta + partner_delta) / (
+            self.delta_rms(current_delta) + self.delta_rms(partner_delta) + 1e-8
+        )
+        return mx.stop_gradient(residual)
+
+    def adaptive_correct_metrics(
+        self,
+        layer_idx: int,
+        block_idx: int,
+        block_deltas: list[mx.array],
+        block_delta_ready: list[bool],
+    ) -> tuple[mx.array, mx.array, mx.array] | None:
+        if not self.shared_core_adaptive_correct:
+            return None
+        if block_idx != self.shared_core_adaptive_correct_block_idx:
+            return None
+        if self.shared_core_adaptive_correct_revisit_only and self.revisit_count_for_layer(layer_idx) <= 0:
+            return None
+        if len(self.shared_core_adaptive_correct_sources) != 2:
+            return None
+        source_a, source_b = (ord(ch) - ord("A") for ch in self.shared_core_adaptive_correct_sources)
+        if not (block_delta_ready[source_a] and block_delta_ready[source_b]):
+            return None
+        delta_a = block_deltas[source_a]
+        delta_b = block_deltas[source_b]
+        cos_ab = self.tokenwise_cosine_mean(delta_a, delta_b)
+        align = mx.clip((cos_ab + 1.0) * 0.5, 0.0, 1.0)
+        amp_ratio = self.delta_rms(delta_b) / (self.delta_rms(delta_a) + 1e-8)
+        amp_log_error = mx.abs(mx.log(amp_ratio + 1e-8) - self.shared_core_adaptive_correct_target_log_amp)
+        amp_score = 1.0 / (1.0 + amp_log_error / self.shared_core_adaptive_correct_log_band)
+        lambda_c = mx.clip(
+            mx.stop_gradient(self.shared_core_adaptive_correct_max_gain * align * amp_score),
+            0.0,
+            self.shared_core_adaptive_correct_max_gain,
+        )
+        return lambda_c, mx.stop_gradient(cos_ab), mx.stop_gradient(amp_ratio)
+
+    def directional_correct_metrics(
+        self,
+        layer_idx: int,
+        block_idx: int,
+        block_deltas: list[mx.array],
+        block_delta_ready: list[bool],
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array] | None:
+        if not self.shared_core_directional_correct:
+            return None
+        if block_idx != self.shared_core_directional_correct_block_idx:
+            return None
+        if self.shared_core_directional_correct_revisit_only and self.revisit_count_for_layer(layer_idx) <= 0:
+            return None
+        if len(self.shared_core_directional_correct_sources) != 2:
+            return None
+        source_a, source_b = (ord(ch) - ord("A") for ch in self.shared_core_directional_correct_sources)
+        if not (block_delta_ready[source_a] and block_delta_ready[source_b]):
+            return None
+        delta_a = block_deltas[source_a]
+        delta_b = block_deltas[source_b]
+        cos_ab = self.tokenwise_cosine_mean(delta_a, delta_b)
+        align = mx.clip((cos_ab + 1.0) * 0.5, 0.0, 1.0)
+        amp_ratio = self.delta_rms(delta_b) / (self.delta_rms(delta_a) + 1e-8)
+        amp_excess = mx.maximum(mx.log(amp_ratio + 1e-8) - self.shared_core_directional_correct_target_log_amp, 0.0)
+        gain_score = amp_excess / (amp_excess + self.shared_core_directional_correct_log_band)
+        lambda_d = mx.clip(
+            mx.stop_gradient(self.shared_core_directional_correct_max_gain * align * gain_score),
+            0.0,
+            self.shared_core_directional_correct_max_gain,
+        )
+        mode = delta_b - self.shared_core_directional_correct_target_amp * delta_a
+        return lambda_d, mx.stop_gradient(cos_ab), mx.stop_gradient(amp_ratio), mx.stop_gradient(mode)
+
+    def orbit_gate_match(
+        self,
+        layer_idx: int,
+        block_idx: int,
+        x: mx.array,
+        candidate: mx.array,
+        x0: mx.array,
+    ) -> mx.array | None:
+        if not self.shared_core_orbit_gate:
+            return None
+        if block_idx != self.shared_core_orbit_gate_block_idx:
+            return None
+        if self.shared_core_orbit_gate_revisit_only and self.revisit_count_for_layer(layer_idx) <= 0:
+            return None
+        steps = min(self.shared_core_orbit_gate_steps, self.num_layers - layer_idx)
+        if steps <= 0:
+            return None
+        ref_state = x
+        candidate_state = candidate
+        match = mx.array(1.0, dtype=mx.float32)
+        for offset in range(steps):
+            ref_sig = self.activation_quant_signature(ref_state)
+            candidate_sig = self.activation_quant_signature(candidate_state)
+            step_match = mx.min((ref_sig == candidate_sig).astype(mx.float32))
+            match = match * step_match
+            next_layer = layer_idx + offset + 1
+            if next_layer >= self.num_layers:
+                break
+            ref_state = self.apply_block(next_layer, ref_state, x0)
+            candidate_state = self.apply_block(next_layer, candidate_state, x0)
+        return mx.stop_gradient(match)
+
+    def attractor_pulse_metrics(
+        self,
+        layer_idx: int,
+        block_idx: int,
+        candidate: mx.array,
+        pulse_candidate: mx.array,
+        x0: mx.array,
+        amp_ratio: mx.array,
+        layer_deltas: list[mx.array],
+        layer_delta_ready: list[bool],
+    ) -> tuple[mx.array, mx.array, mx.array] | None:
+        if not self.shared_core_attractor_pulse:
+            return None
+        if block_idx != self.shared_core_attractor_pulse_block_idx:
+            return None
+        if self.shared_core_attractor_pulse_revisit_only and self.revisit_count_for_layer(layer_idx) <= 0:
+            return None
+        trigger = (amp_ratio >= self.shared_core_attractor_pulse_trigger_amp).astype(mx.float32)
+        mirror_residual = self.mirror_cancel_metric(layer_idx, block_idx, layer_deltas, layer_delta_ready)
+        if self.shared_core_mirror_cancel:
+            if mirror_residual is None:
+                zero = mx.array(0.0, dtype=mx.float32)
+                return zero, zero, mx.array(float("nan"), dtype=mx.float32)
+            trigger = trigger * (mirror_residual >= self.shared_core_mirror_cancel_threshold).astype(mx.float32)
+        elif mirror_residual is None:
+            mirror_residual = mx.array(float("nan"), dtype=mx.float32)
+        steps = min(self.shared_core_attractor_pulse_steps, self.num_layers - layer_idx)
+        base_state = candidate
+        pulse_state = pulse_candidate
+        base_stress = mx.array(0.0, dtype=mx.float32)
+        pulse_stress = mx.array(0.0, dtype=mx.float32)
+        for offset in range(steps):
+            base_stress = base_stress + self.activation_quant_stress(base_state)
+            pulse_stress = pulse_stress + self.activation_quant_stress(pulse_state)
+            next_layer = layer_idx + offset + 1
+            if next_layer >= self.num_layers:
+                break
+            base_state = self.apply_block(next_layer, base_state, x0)
+            pulse_state = self.apply_block(next_layer, pulse_state, x0)
+        stress_delta = mx.stop_gradient(base_stress - pulse_stress)
+        select = mx.stop_gradient(trigger * (stress_delta > self.shared_core_attractor_pulse_margin).astype(mx.float32))
+        return select, stress_delta, mx.stop_gradient(mirror_residual)
+
+    def apply_post_block_controls(
+        self,
+        layer_idx: int,
+        x0: mx.array,
+        x_in: mx.array,
+        x: mx.array,
+        anchor: mx.array,
+        anchor_count: int,
+        block_deltas: list[mx.array],
+        block_delta_ready: list[bool],
+        layer_deltas: list[mx.array],
+        layer_delta_ready: list[bool],
+    ) -> tuple[mx.array, mx.array, int, tuple[mx.array, ...] | None]:
+        block_idx = self.block_index(layer_idx)
+        delta = x - x_in
+        block_deltas[block_idx] = delta
+        block_delta_ready[block_idx] = True
+        layer_deltas[layer_idx] = delta
+        layer_delta_ready[layer_idx] = True
+        if self.shared_core_correct_block_idx is not None and block_idx == self.shared_core_correct_block_idx:
+            x = self.blend_toward_anchor(x, anchor, self.shared_core_correct_gain)
+        gate_metrics = self.adaptive_correct_metrics(layer_idx, block_idx, block_deltas, block_delta_ready)
+        if gate_metrics is not None:
+            x = self.blend_toward_anchor(x, anchor, gate_metrics[0])
+        directional_metrics = self.directional_correct_metrics(layer_idx, block_idx, block_deltas, block_delta_ready)
+        if directional_metrics is not None:
+            lambda_eff = directional_metrics[0]
+            stress_factor = mx.array(1.0, dtype=mx.float32)
+            stress_delta = mx.array(0.0, dtype=mx.float32)
+            if self.shared_core_directional_stress_guard:
+                candidate_probe = self.project_away_mode(x, anchor, directional_metrics[3], lambda_eff)
+                stress_before = self.activation_quant_stress(x)
+                stress_after = self.activation_quant_stress(candidate_probe)
+                stress_delta = mx.stop_gradient(mx.maximum(stress_after - stress_before, 0.0))
+                stress_factor = mx.stop_gradient(
+                    mx.clip(
+                        1.0 / (1.0 + stress_delta / self.shared_core_directional_stress_band),
+                        self.shared_core_directional_stress_min_factor,
+                        1.0,
+                    )
+                )
+                lambda_eff = mx.stop_gradient(lambda_eff * stress_factor)
+            candidate = self.project_away_mode(x, anchor, directional_metrics[3], lambda_eff)
+            orbit_match = self.orbit_gate_match(layer_idx, block_idx, x, candidate, x0)
+            if orbit_match is not None:
+                candidate = x + orbit_match.astype(x.dtype) * (candidate - x)
+                gate_metrics = (
+                    lambda_eff * orbit_match,
+                    directional_metrics[1],
+                    directional_metrics[2],
+                    orbit_match,
+                )
+            else:
+                gate_metrics = (lambda_eff, directional_metrics[1], directional_metrics[2])
+            if self.shared_core_directional_stress_guard:
+                gate_metrics = gate_metrics + (stress_factor, stress_delta)
+            pulse_candidate = self.blend_toward_anchor(candidate, anchor, self.shared_core_attractor_pulse_gain)
+            pulse_metrics = self.attractor_pulse_metrics(
+                layer_idx,
+                block_idx,
+                candidate,
+                pulse_candidate,
+                x0,
+                directional_metrics[2],
+                layer_deltas,
+                layer_delta_ready,
+            )
+            if pulse_metrics is not None:
+                candidate = candidate + pulse_metrics[0].astype(candidate.dtype) * (pulse_candidate - candidate)
+                gate_metrics = (
+                    gate_metrics[0],
+                    gate_metrics[1],
+                    gate_metrics[2],
+                    pulse_metrics[0],
+                    pulse_metrics[1],
+                    pulse_metrics[2],
+                )
+            x = candidate
+        if self.should_stabilize_layer(layer_idx):
+            x = self.blend_toward_anchor(x, anchor, self.shared_core_stabilize_gain)
+        anchor_count += 1
+        anchor = anchor + (x - anchor) / anchor_count
+        return x, anchor, anchor_count, gate_metrics
+
+    def __call__(self, input_ids: mx.array) -> mx.array:
+        x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
+        x0 = x
+        anchor = x
+        anchor_count = 1
+        block_deltas = [mx.zeros_like(x) for _ in range(self.num_unique_blocks)]
+        block_delta_ready = [False] * self.num_unique_blocks
+        layer_deltas = [mx.zeros_like(x) for _ in range(self.num_layers)]
+        layer_delta_ready = [False] * self.num_layers
+        skips: list[mx.array] = []
+
+        for i in range(self.num_encoder_layers):
+            x_in = x
+            x = self.apply_block(i, x, x0)
+            x, anchor, anchor_count, _ = self.apply_post_block_controls(
+                i,
+                x0,
+                x_in,
+                x,
+                anchor,
+                anchor_count,
+                block_deltas,
+                block_delta_ready,
+                layer_deltas,
+                layer_delta_ready,
+            )
+            skips.append(x)
+        for i in range(self.num_decoder_layers):
+            # Odd layer counts have one more decoder block than encoder block. The baseline only
+            # applies a skip connection when one exists, then runs the remaining decoder block(s)
+            # without an added skip.
+            if skips:
+                x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skips.pop()
+            layer_idx = self.num_encoder_layers + i
+            x_in = x
+            x = self.apply_block(layer_idx, x, x0)
+            x, anchor, anchor_count, _ = self.apply_post_block_controls(
+                layer_idx,
+                x0,
+                x_in,
+                x,
+                anchor,
+                anchor_count,
+                block_deltas,
+                block_delta_ready,
+                layer_deltas,
+                layer_delta_ready,
+            )
+        return self.final_norm(x)
+
+    def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        # Cross-entropy over flattened tokens. We keep optional logit chunking because it is a useful
+        # memory knob on Macs, but the common path is chunk_tokens=0 (single matmul + CE).
+        x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
+        y = target_ids.reshape(-1)
+        if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
+            logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
+            logits = self.softcap(logits_proj)
+            return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
+
+        loss_sum = mx.array(0.0, dtype=mx.float32)
+        n = int(x.shape[0])
+        for s in range(0, n, self.logit_chunk_tokens):
+            e = min(s + self.logit_chunk_tokens, n)
+            logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
+            logits = self.softcap(logits_proj)
+            loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
+        return loss_sum / float(n)
+
+# ==============================================================================
+# OPTIMIZERS (MUON + ADAM SPLIT)
+# ==============================================================================
+class Muon:
+    # Muon applies SGD-momentum to matrix gradients, then orthogonalizes the result before the
+    # parameter update.
+    def __init__(self, keys: list[str], params: dict[str, mx.array], args: Hyperparameters):
+        self.keys = keys
+        self.args = args
+        self.buffers = {k: mx.zeros_like(params[k]) for k in keys}
+
+    def step(self, params: dict[str, mx.array], grads: dict[str, mx.array], step: int, lr_mul: float) -> dict[str, mx.array]:
+        if self.args.muon_momentum_warmup_steps:
+            t = min(step / self.args.muon_momentum_warmup_steps, 1.0)
+            momentum = (1.0 - t) * self.args.muon_momentum_warmup_start + t * self.args.muon_momentum
+        else:
+            momentum = self.args.muon_momentum
+        lr = self.args.matrix_lr * lr_mul
+        out: dict[str, mx.array] = {}
+        for k in self.keys:
+            p = params[k]
+            g = grads[k]
+            buf = momentum * self.buffers[k] + g
+            self.buffers[k] = buf
+            g_eff = g + momentum * buf
+            g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
+            scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
+            out[k] = p - lr * (g_ortho * scale).astype(p.dtype)
+        return out
+
+
+class SplitOptimizers:
+    # - embeddings: Adam with the tied-embedding LR
+    # - block matrices (2D): Muon
+    # - block scalars + skip weights: Adam
+    # This preserves the high-level optimization behavior even though MLX internals differ.
+    def __init__(self, model: GPT, args: Hyperparameters):
+        self.args = args
+        params = dict(tree_flatten(model.parameters()))
+        self.embed_key = "tok_emb.weight"
+        self.matrix_keys = [
+            k
+            for k, p in params.items()
+            if k.startswith("blocks.") and p.ndim == 2 and not any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)
+        ]
+        self.scalar_keys = [
+            k
+            for k, p in params.items()
+            if k in {
+                "skip_weights",
+                "step_scales",
+                "pass_x0_scales",
+                "revisit_gains",
+                "revisit_count_gains",
+                "revisit_gains_encoder",
+                "revisit_gains_decoder",
+            } or (k.startswith("blocks.") and (p.ndim < 2 or any(pattern in k for pattern in CONTROL_TENSOR_NAME_PATTERNS)))
+        ]
+
+        self.muon = Muon(self.matrix_keys, params, args)
+        self.adam_embed = optim.Adam(
+            learning_rate=args.tied_embed_lr,
+            betas=[args.beta1, args.beta2],
+            eps=args.adam_eps,
+            bias_correction=True,
+        )
+        self.adam_scalar = optim.Adam(
+            learning_rate=args.scalar_lr,
+            betas=[args.beta1, args.beta2],
+            eps=args.adam_eps,
+            bias_correction=True,
+        )
+
+    def step(self, model: GPT, grads_tree: dict, step: int, lr_mul: float) -> None:
+        params = dict(tree_flatten(model.parameters()))
+        grads = dict(tree_flatten(grads_tree))
+        updated = dict(params)
+
+        updated.update(self.muon.step(params, grads, step=step, lr_mul=lr_mul))
+
+        self.adam_embed.learning_rate = self.args.tied_embed_lr * lr_mul
+        updated.update(
+            self.adam_embed.apply_gradients(
+                {self.embed_key: grads[self.embed_key]},
+                {self.embed_key: params[self.embed_key]},
+            )
+        )
+
+        self.adam_scalar.learning_rate = self.args.scalar_lr * lr_mul
+        scalar_grads = {k: grads[k] for k in self.scalar_keys}
+        scalar_params = {k: params[k] for k in self.scalar_keys}
+        updated.update(self.adam_scalar.apply_gradients(scalar_grads, scalar_params))
+
+        model.update(tree_unflatten(list(updated.items())))
+
+# ==============================================================================
+# QUANTIZATION (INT8 + ZLIB)
+# ==============================================================================
+# - per-row int8 for 2D float tensors
+# - per-tensor int8 for other float tensors
+# - fp16 passthrough for small float tensors
+# - exact passthrough for non-floats
+
+MX_DTYPE_FROM_NAME = {
+    "float32": mx.float32,
+    "float16": mx.float16,
+    "bfloat16": mx.bfloat16,
+}
+
+INT8_KEEP_FLOAT_MAX_NUMEL = 65_536
+INT8_KEEP_FLOAT_STORE_DTYPE = np.float16
+INT8_PER_ROW_SCALE_DTYPE = np.float16
+INT8_CLIP_PERCENTILE = 99.99984
+INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+INT8_COMPRESSOR = os.environ.get("INT8_COMPRESSOR", "lzma").strip().lower()
+INT8_COMPRESSOR_EXT = {"zlib": ".ptz", "lzma": ".ptx"}
+
+
+def compress_quant_blob(raw: bytes) -> tuple[str, bytes]:
+    if INT8_COMPRESSOR == "zlib":
+        return INT8_COMPRESSOR, zlib.compress(raw, level=9)
+    if INT8_COMPRESSOR == "lzma":
+        return INT8_COMPRESSOR, lzma.compress(raw, preset=(9 | lzma.PRESET_EXTREME))
+    raise ValueError(f"Unsupported INT8_COMPRESSOR={INT8_COMPRESSOR!r}; use zlib or lzma")
+
+
+def decompress_quant_blob(blob: bytes) -> tuple[str, bytes]:
+    if blob.startswith(b"\xfd7zXZ\x00"):
+        return "lzma", lzma.decompress(blob)
+    try:
+        return "zlib", zlib.decompress(blob)
+    except zlib.error as exc:
+        raise ValueError("Unsupported int8 artifact compression format") from exc
+
+
+def _np_float32(arr: mx.array) -> np.ndarray:
+    return np.array(arr.astype(mx.float32), dtype=np.float32, copy=False)
+
+
+def keep_float_array(name: str, arr: mx.array, passthrough_orig_dtypes: dict[str, str]) -> np.ndarray:
+    if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
+        return np.ascontiguousarray(_np_float32(arr))
+    if arr.dtype in {mx.float32, mx.bfloat16}:
+        passthrough_orig_dtypes[name] = str(arr.dtype).split(".")[-1]
+        return np.ascontiguousarray(np.array(arr.astype(mx.float16), dtype=INT8_KEEP_FLOAT_STORE_DTYPE, copy=False))
+    return np.ascontiguousarray(np.array(arr, copy=True))
+
+
+def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
+    f32 = _np_float32(arr)
+    if f32.ndim == 2:
+        # Matrices get one scale per row, which usually tracks output-channel
+        # ranges much better than a single tensor-wide scale.
+        clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
+        clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
+        scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
+        q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
+        return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
+
+    # Vectors / scalars use a simpler per-tensor scale.
+    clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
+    scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
+    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    return np.ascontiguousarray(q), scale
+
+
+def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str, object], dict[str, int]]:
+    quantized: dict[str, np.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
+    dtypes: dict[str, str] = {}
+    passthrough: dict[str, np.ndarray] = {}
+    passthrough_orig_dtypes: dict[str, str] = {}
+    qmeta: dict[str, dict[str, object]] = {}
+    stats = dict.fromkeys(
+        ("param_count", "num_tensors", "num_float_tensors", "num_nonfloat_tensors", "baseline_tensor_bytes", "int8_payload_bytes"),
+        0,
+    )
+    for name, arr in flat_state.items():
+        stats["param_count"] += int(arr.size)
+        stats["num_tensors"] += 1
+        stats["baseline_tensor_bytes"] += int(arr.nbytes)
+        if not mx.issubdtype(arr.dtype, mx.floating):
+            stats["num_nonfloat_tensors"] += 1
+            passthrough[name] = np.ascontiguousarray(np.array(arr))
+            stats["int8_payload_bytes"] += int(passthrough[name].nbytes)
+            continue
+
+        # Small float tensors are cheap enough to keep directly. We still downcast
+        # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
+        if int(arr.size) <= INT8_KEEP_FLOAT_MAX_NUMEL:
+            kept = keep_float_array(name, arr, passthrough_orig_dtypes)
+            passthrough[name] = kept
+            stats["int8_payload_bytes"] += int(kept.nbytes)
+            continue
+
+        stats["num_float_tensors"] += 1
+        q, s = quantize_float_array(arr)
+        if s.ndim > 0:
+            qmeta[name] = {"scheme": "per_row", "axis": 0}
+        quantized[name] = q
+        scales[name] = s
+        dtypes[name] = str(arr.dtype).split(".")[-1]
+        stats["int8_payload_bytes"] += int(q.nbytes + s.nbytes)
+    obj: dict[str, object] = {
+        "__quant_format__": "int8_clean_per_row_v1",
+        "quantized": quantized,
+        "scales": scales,
+        "dtypes": dtypes,
+        "passthrough": passthrough,
+    }
+    if qmeta:
+        obj["qmeta"] = qmeta
+    if passthrough_orig_dtypes:
+        obj["passthrough_orig_dtypes"] = passthrough_orig_dtypes
+    return obj, stats
+
+
+def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.array]:
+    out: dict[str, mx.array] = {}
+    qmeta = quant_obj.get("qmeta", {})
+    passthrough_orig_dtypes = quant_obj.get("passthrough_orig_dtypes", {})
+    for name, q in quant_obj["quantized"].items():
+        q_np = np.asarray(q, dtype=np.int8)
+        dtype_name = quant_obj["dtypes"][name]
+        scale = np.asarray(quant_obj["scales"][name], dtype=np.float32)
+        if qmeta.get(name, {}).get("scheme") == "per_row" or scale.ndim > 0:
+            # Broadcast the saved row scale back across trailing dimensions.
+            out_arr = q_np.astype(np.float32) * scale.reshape((q_np.shape[0],) + (1,) * (q_np.ndim - 1))
+        else:
+            out_arr = q_np.astype(np.float32) * float(scale)
+        out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[dtype_name])
+    for name, arr in quant_obj["passthrough"].items():
+        # Restore small tensors, undoing the temporary fp16 storage cast if needed.
+        out_arr = np.array(arr, copy=True)
+        orig_dtype = passthrough_orig_dtypes.get(name)
+        if isinstance(orig_dtype, str):
+            out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[orig_dtype])
+        else:
+            out[name] = mx.array(out_arr)
+    return out
+
+
+def build_sentencepiece_luts(
+    sp: spm.SentencePieceProcessor, vocab_size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    sp_vocab_size = int(sp.vocab_size())
+    table_size = max(sp_vocab_size, vocab_size)
+    base_bytes_lut = np.zeros((table_size,), dtype=np.int16)
+    has_leading_space_lut = np.zeros((table_size,), dtype=np.bool_)
+    is_boundary_token_lut = np.ones((table_size,), dtype=np.bool_)
+    for token_id in range(sp_vocab_size):
+        if sp.is_control(token_id) or sp.is_unknown(token_id) or sp.is_unused(token_id):
+            continue
+        is_boundary_token_lut[token_id] = False
+        if sp.is_byte(token_id):
+            base_bytes_lut[token_id] = 1
+            continue
+        piece = sp.id_to_piece(token_id)
+        if piece.startswith("▁"):
+            has_leading_space_lut[token_id] = True
+            piece = piece[1:]
+        base_bytes_lut[token_id] = len(piece.encode("utf-8"))
+    return base_bytes_lut, has_leading_space_lut, is_boundary_token_lut
+
+
+def validate_dataset_tokenizer_pair(data_path: str, tokenizer_path: str) -> tuple[str, int, int | None]:
+    # The shard directory and tokenizer are coupled: val_bpb is only meaningful if we
+    # decode bytes with the exact tokenizer that produced the shards. The manifest
+    # lets the training script fail fast on accidental dataset/tokenizer mismatches.
+    dataset_dir = Path(data_path).resolve()
+    actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
+    if len(dataset_dir.parents) < 2:
+        return dataset_dir.name, actual_train_files, None
+    manifest_path = dataset_dir.parents[1] / "manifest.json"
+    if not manifest_path.is_file():
+        return dataset_dir.name, actual_train_files, None
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dataset_entry = next((x for x in manifest.get("datasets", []) if x.get("name") == dataset_dir.name), None)
+    if dataset_entry is None:
+        return dataset_dir.name, actual_train_files, None
+
+    tokenizer_name = dataset_entry.get("tokenizer_name")
+    tokenizer_entry = (
+        next((x for x in manifest.get("tokenizers", []) if x.get("name") == tokenizer_name), None)
+        if tokenizer_name
+        else None
+    )
+    expected_name = Path((tokenizer_entry or {}).get("model_path") or (tokenizer_entry or {}).get("path") or "").name
+    if expected_name and Path(tokenizer_path).name != expected_name:
+        raise ValueError(f"{dataset_dir.name} expects tokenizer {expected_name}, got {Path(tokenizer_path).name}")
+    expected_train_files = (dataset_entry.get("stats") or {}).get("files_train")
+    if expected_train_files is not None:
+        expected_train_files = int(expected_train_files)
+        if actual_train_files > expected_train_files:
+            raise ValueError(
+                f"{dataset_dir.name} has more train shards than expected: found {actual_train_files}, "
+                f"manifest says {expected_train_files}"
+            )
+    return dataset_dir.name, actual_train_files, expected_train_files
+
+
+def load_validation_tokens(pattern: str, seq_len: int) -> np.ndarray:
+    files = [Path(p) for p in sorted(glob.glob(pattern))]
+    if not files:
+        raise FileNotFoundError(f"No files found for pattern: {pattern}")
+    # The export pipeline writes the fixed first-50k-doc validation set to fineweb_val_*.
+    tokens = np.ascontiguousarray(np.concatenate([load_data_shard(file) for file in files], axis=0))
+    usable = ((tokens.size - 1) // seq_len) * seq_len
+    if usable <= 0:
+        raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
+    return tokens[: usable + 1]
+
+
+def loss_and_grad_chunked(
+    args: Hyperparameters,
+    train_loader: TokenLoader,
+    compiled_loss_and_grad,
+) -> tuple[mx.array, dict[str, mx.array]]:
+    chunk_sizes = token_chunks(args.microbatch_tokens, args.train_seq_len, args.mlx_max_microbatch_tokens)
+    total_tokens = float(sum(chunk_sizes))
+    loss_value = mx.array(0.0, dtype=mx.float32)
+    grad_accum: dict[str, mx.array] | None = None
+    for chunk_tokens in chunk_sizes:
+        x, y = train_loader.next_batch(chunk_tokens, args.train_seq_len)
+        loss, grads = compiled_loss_and_grad(x, y)
+        flat_grads = dict(tree_flatten(grads))
+        scale = float(y.size) / total_tokens
+        loss_value = loss_value + loss.astype(mx.float32) * scale
+        grad_accum = accumulate_flat_grads(grad_accum, flat_grads, scale)
+    if grad_accum is None:
+        raise RuntimeError("loss_and_grad_chunked produced no gradients")
+    return loss_value, grad_accum
+
+
+def eval_val(
+    args: Hyperparameters,
+    compiled_loss,
+    val_tokens: np.ndarray,
+    base_bytes_lut: np.ndarray,
+    has_leading_space_lut: np.ndarray,
+    is_boundary_token_lut: np.ndarray,
+    log_fn: Callable[[str], None] | None = None,
+) -> tuple[float, float]:
+    # Validation computes two metrics:
+    # - val_loss: token cross-entropy (natural log)
+    # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    val_batch_tokens = effective_val_batch_tokens(args)
+    val_batch_seqs = val_batch_tokens // args.train_seq_len
+    total_seqs = (val_tokens.size - 1) // args.train_seq_len
+    total_batches = max((total_seqs + val_batch_seqs - 1) // val_batch_seqs, 1)
+    total_loss_sum = 0.0
+    total_tokens = 0.0
+    total_bytes = 0.0
+    batch_losses: list[mx.array] = []
+    batch_token_counts: list[float] = []
+    for batch_idx, batch_seq_start in enumerate(range(0, total_seqs, val_batch_seqs), start=1):
+        batch_seq_end = min(batch_seq_start + val_batch_seqs, total_seqs)
+        raw_start = batch_seq_start * args.train_seq_len
+        raw_end = batch_seq_end * args.train_seq_len + 1
+        chunk = val_tokens[raw_start:raw_end]
+        x_np = chunk[:-1].reshape(-1, args.train_seq_len)
+        y_np = chunk[1:].reshape(-1, args.train_seq_len)
+        x = mx.array(x_np, dtype=mx.int32)
+        y = mx.array(y_np, dtype=mx.int32)
+        chunk_token_count = float(y.size)
+        batch_loss = compiled_loss(x, y).astype(mx.float32)
+        batch_losses.append(batch_loss)
+        batch_token_counts.append(chunk_token_count)
+        prev_ids = x_np.reshape(-1)
+        tgt_ids = y_np.reshape(-1)
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        total_tokens += chunk_token_count
+        total_bytes += float(bytes_np.astype(np.float64).sum())
+        if len(batch_losses) >= 16 or batch_idx == total_batches:
+            mx.eval(*batch_losses)
+            for loss_value, token_count in zip(batch_losses, batch_token_counts):
+                total_loss_sum += float(loss_value.item()) * token_count
+            batch_losses.clear()
+            batch_token_counts.clear()
+        if log_fn is not None and total_batches > 1 and (
+            batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
+        ):
+            log_fn(f"val_progress:{batch_idx}/{total_batches}")
+    val_loss = total_loss_sum / total_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    val_bpb = bits_per_token * (total_tokens / total_bytes)
+    return val_loss, val_bpb
+
+# -----------------------------
+# TRAINING
+# -----------------------------
+
+def clip_grad_tree(grads_tree: dict[str, mx.array], max_norm: float) -> tuple[dict[str, mx.array], float | None]:
+    if max_norm <= 0:
+        return grads_tree, None
+    clipped_grads, total_norm = optim.clip_grad_norm(grads_tree, max_norm)
+    mx.eval(total_norm)
+    total_norm_value = float(total_norm.item()) if hasattr(total_norm, "item") else float(total_norm)
+    return clipped_grads, total_norm_value
+
+
+def main() -> None:
+    # ==============================================================================
+    # TOKENIZER + VALIDATION METRIC SETUP
+    # ==============================================================================
+    args = Hyperparameters()
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logfile = out_dir / f"{args.run_id}.txt"
+    print(logfile)
+
+    def log(msg: str, console: bool = True) -> None:
+        if console:
+            print(msg)
+        with logfile.open("a", encoding="utf-8") as f:
+            print(msg, file=f)
+
+    code = Path(__file__).read_text(encoding="utf-8")
+    log(code, console=False)
+    log("=" * 100, console=False)
+    log(f"Running Python {sys.version}", console=False)
+    log(f"Running MLX {mx.__version__}", console=False)
+    log("=" * 100, console=False)
+
+    if not args.tie_embeddings:
+        raise NotImplementedError("train_gpt_mlx.py only supports tied embeddings")
+    if not args.tokenizer_path.endswith(".model"):
+        raise ValueError(f"TOKENIZER_PATH must point to a SentencePiece .model file: {args.tokenizer_path}")
+    sp = spm.SentencePieceProcessor(model_file=args.tokenizer_path)
+    if int(sp.vocab_size()) != args.vocab_size:
+        raise ValueError(
+            f"VOCAB_SIZE={args.vocab_size} does not match tokenizer vocab_size={int(sp.vocab_size())}"
+        )
+    dataset_name, actual_train_files, expected_train_files = validate_dataset_tokenizer_pair(
+        args.data_path,
+        args.tokenizer_path,
+    )
+    val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
+
+    base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
+        sp, args.vocab_size
+    )
+
+    # ==============================================================================
+    # TRAINING SETUP
+    # ==============================================================================
+    mx.random.seed(args.seed)
+
+    train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
+
+    # ==============================================================================
+    # MODEL + OPTIMIZER SETUP
+    # ==============================================================================
+    model = GPT(
+        vocab_size=args.vocab_size,
+        num_layers=args.num_layers,
+        shared_core_blocks=args.shared_core_blocks,
+        shared_core_schedule=args.shared_core_schedule,
+        shared_core_custom_schedule=args.shared_core_custom_schedule,
+        shared_core_role_gains=args.shared_core_role_gains,
+        shared_core_pass_x0=args.shared_core_pass_x0,
+        shared_core_revisit_gain=args.shared_core_revisit_gain,
+        shared_core_revisit_count_gain=args.shared_core_revisit_count_gain,
+        shared_core_phase_split_revisit_gain=args.shared_core_phase_split_revisit_gain,
+        shared_core_revisit_damping=args.shared_core_revisit_damping,
+        shared_core_correct_block=args.shared_core_correct_block,
+        shared_core_correct_gain=args.shared_core_correct_gain,
+        shared_core_adaptive_correct=args.shared_core_adaptive_correct,
+        shared_core_adaptive_correct_block=args.shared_core_adaptive_correct_block,
+        shared_core_adaptive_correct_sources=args.shared_core_adaptive_correct_sources,
+        shared_core_adaptive_correct_max_gain=args.shared_core_adaptive_correct_max_gain,
+        shared_core_adaptive_correct_target_amp=args.shared_core_adaptive_correct_target_amp,
+        shared_core_adaptive_correct_log_band=args.shared_core_adaptive_correct_log_band,
+        shared_core_adaptive_correct_revisit_only=args.shared_core_adaptive_correct_revisit_only,
+        shared_core_directional_correct=args.shared_core_directional_correct,
+        shared_core_directional_correct_block=args.shared_core_directional_correct_block,
+        shared_core_directional_correct_sources=args.shared_core_directional_correct_sources,
+        shared_core_directional_correct_max_gain=args.shared_core_directional_correct_max_gain,
+        shared_core_directional_correct_target_amp=args.shared_core_directional_correct_target_amp,
+        shared_core_directional_correct_log_band=args.shared_core_directional_correct_log_band,
+        shared_core_directional_correct_revisit_only=args.shared_core_directional_correct_revisit_only,
+        shared_core_directional_stress_guard=args.shared_core_directional_stress_guard,
+        shared_core_directional_stress_band=args.shared_core_directional_stress_band,
+        shared_core_directional_stress_min_factor=args.shared_core_directional_stress_min_factor,
+        shared_core_orbit_gate=args.shared_core_orbit_gate,
+        shared_core_orbit_gate_block=args.shared_core_orbit_gate_block,
+        shared_core_orbit_gate_steps=args.shared_core_orbit_gate_steps,
+        shared_core_orbit_gate_revisit_only=args.shared_core_orbit_gate_revisit_only,
+        shared_core_attractor_pulse=args.shared_core_attractor_pulse,
+        shared_core_attractor_pulse_block=args.shared_core_attractor_pulse_block,
+        shared_core_attractor_pulse_steps=args.shared_core_attractor_pulse_steps,
+        shared_core_attractor_pulse_gain=args.shared_core_attractor_pulse_gain,
+        shared_core_attractor_pulse_trigger_amp=args.shared_core_attractor_pulse_trigger_amp,
+        shared_core_attractor_pulse_margin=args.shared_core_attractor_pulse_margin,
+        shared_core_attractor_pulse_revisit_only=args.shared_core_attractor_pulse_revisit_only,
+        shared_core_mirror_cancel=args.shared_core_mirror_cancel,
+        shared_core_mirror_cancel_block=args.shared_core_mirror_cancel_block,
+        shared_core_mirror_cancel_threshold=args.shared_core_mirror_cancel_threshold,
+        shared_core_mirror_cancel_revisit_only=args.shared_core_mirror_cancel_revisit_only,
+        shared_core_stabilize_every=args.shared_core_stabilize_every,
+        shared_core_stabilize_after=args.shared_core_stabilize_after,
+        shared_core_stabilize_gain=args.shared_core_stabilize_gain,
+        dim=args.model_dim,
+        num_heads=args.num_heads,
+        num_kv_heads=args.num_kv_heads,
+        mlp_mult=args.mlp_mult,
+        logit_chunk_tokens=args.logit_chunk_tokens,
+        logit_softcap=args.logit_softcap,
+        rope_base=args.rope_base,
+        tied_embed_init_std=args.tied_embed_init_std,
+        qk_gain_init=args.qk_gain_init,
+    )
+    opt = SplitOptimizers(model, args)
+
+    # ==============================================================================
+    # COMPILED TRAIN / EVAL FUNCTIONS (MLX)
+    # ==============================================================================
+    # The crucial MLX detail is capture scope: this model contains non-trainable arrays too (for example
+    # inside RoPE modules), so compiling only against trainable parameters throws "uncaptured inputs".
+    # Compiling the model-bound functions and capturing the full model state fixes that while still
+    # returning gradients only for trainable parameters via nn.value_and_grad(...).
+    compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_loss_and_grad = mx.compile(
+        nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
+        inputs=model.state,
+        outputs=model.state,
+    )
+
+    # Print config once so logs are self-describing.
+    n_params = sum(int(np.prod(p.shape)) for _, p in tree_flatten(model.parameters()))
+    log(f"run_id:{args.run_id}")
+    log(f"mlx_version:{mx.__version__}")
+    log(f"train_loader:shards pattern={args.train_files}")
+    log(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.size - 1}")
+    if expected_train_files is None:
+        log(f"train_loader:dataset:{dataset_name} train_shards:{actual_train_files}")
+    elif actual_train_files < expected_train_files:
+        log(
+            f"WARNING: train_loader:subset dataset:{dataset_name} "
+            f"train_shards:{actual_train_files}/{expected_train_files} "
+            f"new epochs will arrive sooner than the full dataset"
+        )
+    else:
+        log(f"train_loader:dataset:{dataset_name} train_shards:{actual_train_files}/{expected_train_files}")
+    log(f"tokenizer_path:{args.tokenizer_path}")
+    log(
+        f"model_params:{n_params} vocab_size:{args.vocab_size} layers:{args.num_layers} "
+        f"dim:{args.model_dim} heads:{args.num_heads} kv_heads:{args.num_kv_heads} "
+        f"seq_len:{args.train_seq_len} tie_embeddings:{args.tie_embeddings}"
+    )
+    layer_to_block = [model.block_index(i) for i in range(model.num_layers)]
+    layer_is_revisit = [model.is_revisit_layer(i) for i in range(model.num_layers)]
+    log(
+        f"shared_core:enabled:{model.shared_core_enabled} "
+        f"unique_blocks:{model.num_unique_blocks} "
+        f"schedule:{model.shared_core_schedule} "
+        f"custom_schedule:{model.shared_core_custom_schedule if model.shared_core_schedule == 'custom' else '-'} "
+        f"layer_to_block:{','.join(str(i) for i in layer_to_block)} "
+        f"layer_is_revisit:{','.join('1' if x else '0' for x in layer_is_revisit)} "
+        f"step_scales:{model.step_scales is not None} "
+        f"pass_x0_scales:{model.pass_x0_scales is not None} "
+        f"revisit_gains:{model.revisit_gains is not None} "
+        f"revisit_count_gains:{model.revisit_count_gains is not None} "
+        f"revisit_damping:{args.shared_core_revisit_damping:.3f} "
+        f"phase_split_revisit_gain:{model.shared_core_phase_split_revisit_gain} "
+        f"revisit_gains_encoder:{model.revisit_gains_encoder is not None} "
+        f"revisit_gains_decoder:{model.revisit_gains_decoder is not None} "
+        f"role_gains:{','.join(f'{float(x):.3f}' for x in np.asarray(model.role_gains)) if model.role_gains is not None else '-'} "
+        f"correct_block:{model.block_letter(model.shared_core_correct_block_idx)} "
+        f"correct_gain:{model.shared_core_correct_gain:.3f} "
+        f"adaptive_correct:{model.shared_core_adaptive_correct} "
+        f"adaptive_correct_block:{model.block_letter(model.shared_core_adaptive_correct_block_idx)} "
+        f"adaptive_correct_sources:{model.shared_core_adaptive_correct_sources or '-'} "
+        f"adaptive_correct_revisit_only:{model.shared_core_adaptive_correct_revisit_only} "
+        f"adaptive_correct_max_gain:{model.shared_core_adaptive_correct_max_gain:.3f} "
+        f"adaptive_correct_target_amp:{model.shared_core_adaptive_correct_target_amp:.3f} "
+        f"adaptive_correct_log_band:{model.shared_core_adaptive_correct_log_band:.3f} "
+        f"directional_correct:{model.shared_core_directional_correct} "
+        f"directional_correct_block:{model.block_letter(model.shared_core_directional_correct_block_idx)} "
+        f"directional_correct_sources:{model.shared_core_directional_correct_sources or '-'} "
+        f"directional_correct_revisit_only:{model.shared_core_directional_correct_revisit_only} "
+        f"directional_correct_max_gain:{model.shared_core_directional_correct_max_gain:.3f} "
+        f"directional_correct_target_amp:{model.shared_core_directional_correct_target_amp:.3f} "
+        f"directional_correct_log_band:{model.shared_core_directional_correct_log_band:.3f} "
+        f"directional_stress_guard:{model.shared_core_directional_stress_guard} "
+        f"directional_stress_band:{model.shared_core_directional_stress_band:.3f} "
+        f"directional_stress_min_factor:{model.shared_core_directional_stress_min_factor:.3f} "
+        f"orbit_gate:{model.shared_core_orbit_gate} "
+        f"orbit_gate_block:{model.block_letter(model.shared_core_orbit_gate_block_idx)} "
+        f"orbit_gate_steps:{model.shared_core_orbit_gate_steps} "
+        f"orbit_gate_revisit_only:{model.shared_core_orbit_gate_revisit_only} "
+        f"attractor_pulse:{model.shared_core_attractor_pulse} "
+        f"attractor_pulse_block:{model.block_letter(model.shared_core_attractor_pulse_block_idx)} "
+        f"attractor_pulse_steps:{model.shared_core_attractor_pulse_steps} "
+        f"attractor_pulse_gain:{model.shared_core_attractor_pulse_gain:.3f} "
+        f"attractor_pulse_trigger_amp:{model.shared_core_attractor_pulse_trigger_amp:.3f} "
+        f"attractor_pulse_margin:{model.shared_core_attractor_pulse_margin:.3f} "
+        f"attractor_pulse_revisit_only:{model.shared_core_attractor_pulse_revisit_only} "
+        f"mirror_cancel:{model.shared_core_mirror_cancel} "
+        f"mirror_cancel_block:{model.block_letter(model.shared_core_mirror_cancel_block_idx)} "
+        f"mirror_cancel_threshold:{model.shared_core_mirror_cancel_threshold:.3f} "
+        f"mirror_cancel_revisit_only:{model.shared_core_mirror_cancel_revisit_only} "
+        f"stabilize_every:{model.shared_core_stabilize_every} "
+        f"stabilize_after:{model.shared_core_stabilize_after} "
+        f"stabilize_gain:{model.shared_core_stabilize_gain:.3f}"
+    )
+    log(
+        f"iterations:{args.iterations} train_batch_tokens:{args.train_batch_tokens} grad_accum_steps:{args.grad_accum_steps} "
+        f"microbatch_tokens:{args.microbatch_tokens} microbatch_batch_size:{args.microbatch_tokens // args.train_seq_len} "
+        f"val_max_batch_tokens:{args.val_max_batch_tokens} "
+        f"verify_quantized_roundtrip:{args.verify_quantized_roundtrip} "
+        f"warmup_steps:{args.warmup_steps} max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
+    )
+    log(f"mlx_max_microbatch_tokens:{args.mlx_max_microbatch_tokens}")
+    log(
+        f"optimizer:muon+adam muon_matrix_params:{len(opt.matrix_keys)} scalar_params:{len(opt.scalar_keys)} "
+        f"embed_lr:{args.tied_embed_lr} "
+        f"matrix_lr:{args.matrix_lr} scalar_lr:{args.scalar_lr} "
+        f"muon_momentum:{args.muon_momentum} muon_steps:{args.muon_backend_steps}"
+    )
+    log(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
+    log(f"compute_dtype:{COMPUTE_DTYPE} compile:True")
+    log(
+        f"dtypes tok_emb:{model.tok_emb.weight.dtype} "
+        f"linear_weight:{model.blocks[0].attn.c_q.weight.dtype} "
+        f"skip_weights:{model.skip_weights.dtype}"
+    )
+
+    # ==============================================================================
+    # TRAINING LOOP
+    # ==============================================================================
+    if args.warmup_steps > 0:
+        # Warmup should only prime MLX compile/allocation paths. Updating parameters here forces us
+        # to snapshot and restore model/optimizer state, which is expensive on unified-memory Macs.
+        # Instead we run the real train shapes, force the loss/grads to materialize, and then reset
+        # the loader so measured training still starts from the true init and token window.
+        for warmup_step in range(args.warmup_steps):
+            accum: dict[str, mx.array] | None = None
+            warmup_loss = mx.array(0.0, dtype=mx.float32)
+            grad_scale = 1.0 / args.grad_accum_steps
+            for _ in range(args.grad_accum_steps):
+                loss, flat_grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
+                warmup_loss = warmup_loss + loss.astype(mx.float32) * grad_scale
+                accum = accumulate_flat_grads(accum, flat_grads, grad_scale)
+            mx.eval(warmup_loss, *accum.values())
+            mx.synchronize()
+            if args.warmup_steps <= 20 or (warmup_step + 1) % 10 == 0 or warmup_step + 1 == args.warmup_steps:
+                log(f"warmup_step:{warmup_step + 1}/{args.warmup_steps}")
+
+        # Prime the standalone eval graph once too. It is compiled separately from value_and_grad.
+        val_batch_tokens = effective_val_batch_tokens(args)
+        warm_val_seqs = min(val_batch_tokens // args.train_seq_len, (val_tokens.size - 1) // args.train_seq_len)
+        warm_chunk = val_tokens[: warm_val_seqs * args.train_seq_len + 1]
+        x_val = mx.array(warm_chunk[:-1].reshape(-1, args.train_seq_len), dtype=mx.int32)
+        y_val = mx.array(warm_chunk[1:].reshape(-1, args.train_seq_len), dtype=mx.int32)
+        warm_val_loss = compiled_loss(x_val, y_val)
+        mx.eval(warm_val_loss)
+        mx.synchronize()
+
+        train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
+
+    train_time_ms = 0.0
+    max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
+    stop_after_step: int | None = None
+    run_t0 = time.perf_counter()
+    t0 = time.perf_counter()
+    step = 0
+    while True:
+        last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
+        if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
+            train_time_ms += 1000.0 * (time.perf_counter() - t0)
+            # Validation always scans the same fixed full validation split.
+            val_loss, val_bpb = eval_val(
+                args,
+                compiled_loss,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+                log_fn=log,
+            )
+            if step % 25 == 0 or last_step:
+                log(
+                    f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
+                    f"train_time:{train_time_ms:.0f}ms step_avg:{train_time_ms / max(step, 1):.2f}ms"
+                )
+            t0 = time.perf_counter()
+        if last_step:
+            if stop_after_step is not None and step < args.iterations:
+                elapsed_wallclock_ms = 1000.0 * (time.perf_counter() - run_t0)
+                log(
+                    f"stopping_early: wallclock_cap wallclock_time:{elapsed_wallclock_ms:.0f}ms "
+                    f"train_time:{train_time_ms:.0f}ms step:{step}/{args.iterations}"
+                )
+            break
+
+        elapsed_wallclock_ms = 1000.0 * (time.perf_counter() - run_t0)
+        lr_mul = args.lr_mul(step, elapsed_wallclock_ms)
+        step_t0 = time.perf_counter()
+
+        accum: dict[str, mx.array] | None = None
+        train_loss = mx.array(0.0, dtype=mx.float32)
+        grad_scale = 1.0 / args.grad_accum_steps
+        for _ in range(args.grad_accum_steps):
+            loss, flat_grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
+            accum = accumulate_flat_grads(accum, flat_grads, grad_scale)
+            train_loss = train_loss + loss.astype(mx.float32) * grad_scale
+
+        grads, grad_norm = clip_grad_tree(accum, args.grad_clip_norm)
+        train_loss_value = float(train_loss.item())
+        opt.step(model, grads, step=step, lr_mul=lr_mul)
+        mx.synchronize()
+
+        step_ms = 1000.0 * (time.perf_counter() - step_t0)
+        approx_train_time_ms = train_time_ms + 1000.0 * (time.perf_counter() - t0)
+        tok_s = args.train_batch_tokens / (step_ms / 1000.0)
+        step += 1
+        if args.train_log_every > 0 and (step <= 10 or step % args.train_log_every == 0 or stop_after_step is not None):
+            grad_norm_str = f" grad_norm:{grad_norm:.4f}" if grad_norm is not None else ""
+            log(
+                f"step:{step}/{args.iterations} train_loss:{train_loss_value:.4f} "
+                f"train_time:{approx_train_time_ms:.0f}ms step_avg:{approx_train_time_ms / step:.2f}ms tok_s:{tok_s:.0f}"
+                f"{grad_norm_str}"
+            )
+        elapsed_wallclock_ms = 1000.0 * (time.perf_counter() - run_t0)
+        if max_wallclock_ms is not None and stop_after_step is None and elapsed_wallclock_ms >= max_wallclock_ms:
+            stop_after_step = step
+
+    # ==============================================================================
+    # FINAL SERIALIZATION + QUANTIZED ROUNDTRIP EVAL
+    # ==============================================================================
+    # Always write a raw artifact and a quantized artifact. The expensive final
+    # quantized roundtrip validation is optional so local smoke runs do not pay
+    # for a duplicate full validation pass unless requested.
+    out_path = out_dir / f"{args.run_id}_mlx_model.npz"
+    flat_state = {k: v for k, v in tree_flatten(model.state)}
+    mx.savez(str(out_path), **flat_state)
+    log(f"saved_model:{out_path} bytes:{out_path.stat().st_size}")
+
+    quant_obj, quant_stats = quantize_state_dict_int8(flat_state)
+    quant_raw = pickle.dumps(quant_obj, protocol=pickle.HIGHEST_PROTOCOL)
+    compressor_name, quant_blob = compress_quant_blob(quant_raw)
+    quant_serialized_bytes = len(quant_raw)
+    quant_path = out_dir / f"{args.run_id}_mlx_model.int8{INT8_COMPRESSOR_EXT[compressor_name]}"
+    with quant_path.open("wb") as f:
+        f.write(quant_blob)
+    quant_file_bytes = quant_path.stat().st_size
+    ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
+    log(
+        f"serialized_model_int8_{compressor_name}:{quant_file_bytes} bytes "
+        f"(payload:{quant_stats['int8_payload_bytes']} raw_pickle:{quant_serialized_bytes} payload_ratio:{ratio:.2f}x)"
+    )
+
+    if args.verify_quantized_roundtrip:
+        with quant_path.open("rb") as f:
+            quant_blob_disk = f.read()
+        roundtrip_compressor, quant_raw_disk = decompress_quant_blob(quant_blob_disk)
+        quant_flat = dequantize_state_dict_int8(pickle.loads(quant_raw_disk))
+        model.update(tree_unflatten(list(quant_flat.items())))
+        q_t0 = time.perf_counter()
+        q_val_loss, q_val_bpb = eval_val(
+            args,
+            compiled_loss,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+            log_fn=log,
+        )
+        q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
+        log(f"final_int8_{roundtrip_compressor}_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
+        log(f"final_int8_{roundtrip_compressor}_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+    else:
+        log("final_int8_roundtrip skipped verify_quantized_roundtrip:False")
+
+
+if __name__ == "__main__":
+    main()
+
+====================================================================================================
+Running Python 3.11.11 (main, Dec  9 2025, 11:22:44) [Clang 15.0.0 (clang-1500.1.0.2.5)]
+Running MLX 0.31.1
+====================================================================================================
+run_id:mlx_seq_mlp4x_lzma_cmp_v2
+mlx_version:0.31.1
+train_loader:shards pattern=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/datasets/fineweb10B_sp1024_smoke/fineweb_train_*.bin
+val_loader:shards pattern=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/datasets/fineweb10B_sp1024_smoke/fineweb_val_*.bin tokens:1047552
+train_loader:dataset:fineweb10B_sp1024_smoke train_shards:1
+tokenizer_path:/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/tokenizers/fineweb_1024_bpe.model
+model_params:26497096 vocab_size:1024 layers:9 dim:512 heads:8 kv_heads:4 seq_len:1024 tie_embeddings:True
+shared_core:enabled:False unique_blocks:9 schedule:cyclic custom_schedule:- layer_to_block:0,1,2,3,4,5,6,7,8 layer_is_revisit:0,0,0,0,0,0,0,0,0 step_scales:False pass_x0_scales:False revisit_gains:False revisit_count_gains:False revisit_damping:0.000 phase_split_revisit_gain:False revisit_gains_encoder:False revisit_gains_decoder:False role_gains:- correct_block:- correct_gain:0.000 adaptive_correct:False adaptive_correct_block:- adaptive_correct_sources:- adaptive_correct_revisit_only:True adaptive_correct_max_gain:0.000 adaptive_correct_target_amp:1.000 adaptive_correct_log_band:1.000 directional_correct:False directional_correct_block:- directional_correct_sources:- directional_correct_revisit_only:True directional_correct_max_gain:0.000 directional_correct_target_amp:1.000 directional_correct_log_band:1.000 directional_stress_guard:False directional_stress_band:1.000 directional_stress_min_factor:1.000 orbit_gate:False orbit_gate_block:- orbit_gate_steps:1 orbit_gate_revisit_only:True attractor_pulse:False attractor_pulse_block:- attractor_pulse_steps:1 attractor_pulse_gain:0.000 attractor_pulse_trigger_amp:inf attractor_pulse_margin:0.000 attractor_pulse_revisit_only:True mirror_cancel:False mirror_cancel_block:- mirror_cancel_threshold:inf mirror_cancel_revisit_only:True stabilize_every:0 stabilize_after:0 stabilize_gain:0.000
+iterations:80 train_batch_tokens:8192 grad_accum_steps:8 microbatch_tokens:1024 microbatch_batch_size:1 val_max_batch_tokens:524288 verify_quantized_roundtrip:True warmup_steps:0 max_wallclock_seconds:600.000
+mlx_max_microbatch_tokens:8192
+optimizer:muon+adam muon_matrix_params:54 scalar_params:37 embed_lr:0.05 matrix_lr:0.04 scalar_lr:0.04 muon_momentum:0.95 muon_steps:5
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/tokenizers/fineweb_1024_bpe.model
+compute_dtype:mlx.core.bfloat16 compile:True
+dtypes tok_emb:mlx.core.bfloat16 linear_weight:mlx.core.float32 skip_weights:mlx.core.float32
+step:1/80 train_loss:6.9428 train_time:217ms step_avg:217.12ms tok_s:37731
+step:2/80 train_loss:18.7188 train_time:853ms step_avg:426.67ms tok_s:12880
+step:3/80 train_loss:14.1355 train_time:1478ms step_avg:492.54ms tok_s:13201
+step:4/80 train_loss:9.7105 train_time:2095ms step_avg:523.65ms tok_s:13282
+step:5/80 train_loss:7.6676 train_time:2735ms step_avg:547.04ms tok_s:12792
+step:6/80 train_loss:6.9825 train_time:3370ms step_avg:561.67ms tok_s:12909
+step:7/80 train_loss:6.7131 train_time:3988ms step_avg:569.71ms tok_s:13263
+step:8/80 train_loss:6.6507 train_time:4612ms step_avg:576.47ms tok_s:13141
+step:9/80 train_loss:6.5140 train_time:5229ms step_avg:580.96ms tok_s:13284
+step:10/80 train_loss:6.3534 train_time:5863ms step_avg:586.31ms tok_s:12915
+val_progress:1/2
+val_progress:2/2
+step:80/80 val_loss:4.3589 val_bpb:2.6110 train_time:48883ms step_avg:611.04ms
+saved_model:logs/mlx_seq_mlp4x_lzma_cmp_v2_mlx_model.npz bytes:104960924
+serialized_model_int8_lzma:13522952 bytes (payload:26634528 raw_pickle:26643977 payload_ratio:3.94x)
+val_progress:1/2
+val_progress:2/2
+final_int8_lzma_roundtrip val_loss:4.3601 val_bpb:2.6117 eval_time:14345ms
+final_int8_lzma_roundtrip_exact val_loss:4.36007038 val_bpb:2.61172375

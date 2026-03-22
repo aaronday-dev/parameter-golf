@@ -63,6 +63,13 @@ Then place the tokenizer and dataset shards under `./data/` using the layout in:
 
 - `data/README.md`
 
+To archive a finished run log into `results/` and update the current-best docs when
+appropriate:
+
+```bash
+python3 scripts/archive_parameter_golf_run.py RUN_ID
+```
+
 For Apple Silicon MLX runs:
 
 ```bash

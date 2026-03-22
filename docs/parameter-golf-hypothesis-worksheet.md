@@ -1,224 +1,117 @@
+---
+title: "Parameter Golf Hypothesis Worksheet"
+date: "2026-03-22"
+documentclass: extarticle
+geometry: margin=0.4in
+classoption:
+  - 8pt
+header-includes:
+  - \usepackage{titlesec}
+  - \titlespacing*{\section}{0pt}{0.5ex}{0.4ex}
+  - \titlespacing*{\subsection}{0pt}{0.4ex}{0.3ex}
+  - \setlength{\parskip}{2pt}
+  - \setlength{\parindent}{0pt}
+  - \setlength{\tabcolsep}{4pt}
+---
+
 # Parameter Golf Hypothesis Worksheet
 
-Last updated: 2026-03-22
+Use this only when the current line has plateaued and the next run needs a new mechanism.
 
-This worksheet exists to stop local search from dissolving into nearby knob-twiddling.
+## Header
 
-Use it when the current family has flattened and the next run needs a new mechanism, not another minor variation.
-
-## Current Baseline
-
-Current best promoted local result:
-
+Current winner:
 - `mlx_full_seq_mlp4x_200_realval_vb524k`
 - exact `val_bpb = 2.35796063`
-- same winning quantized payload fits under the artifact cap when re-encoded with `lzma`
 
-Current smoke baseline for this family:
-
+Current smoke baseline:
 - `mlx_seq_mlp4x_lzma_cmp_v2`
 - exact `val_bpb = 2.61172375`
 
-Latest near-neighbor miss:
-
+Latest miss:
 - `mlx_seq_dim528_mlp4x_lzma_cmp_v1`
 - exact `val_bpb = 2.61440332`
 
-Interpretation:
+One-line read:
+- `MLP_MULT` helped; width missed; depth missed; shared-core cleverness lost to plain sequential capacity.
 
-- `MLP_MULT` helped
-- extra width missed
-- extra depth missed
-- shared-core cleverness lost to plain sequential capacity
-- storage/container work is no longer the bottleneck
+## What Changed
 
-## Dead / Alive / Unclear
+- Helped: coarse capacity on the plain sequential winner
+- Failed: width, depth, damping / attractor controls, more shared-core recurrence
+- Still open: signals that help on edge cases; some parts survive re-encoding better than others
 
-### Dead or strongly downranked
+## 45-Minute Flow
 
-- Blunt damping, stabilization, and attractor pulls
-  Why: they often made the exact post-quantized score worse even when they looked cleaner internally.
-- Extra mirrored/shared-core recurrence as the main local story
-  Why: plain sequential capacity beat the best shared-core branch.
-- Width-first local extensions of the current sequential winner
-  Why: `MODEL_DIM=528` on `MLP_MULT=4` missed.
-- Extra depth on the current sequential line
-  Why: `10` layers regressed.
+### 0-5 min: Name the miss
 
-### Alive
+Pick one recent bad or flat run.
+Write one sentence: what changed, where it showed up, why it mattered.
 
-- Plain sequential capacity
-  Why: `MLP_MULT=3` and then `MLP_MULT=4` both improved promoted results.
-- Quantization-sensitive handling of specific tensors or loci
-  Why: the public records show this is high leverage, and we have not really attacked it directly.
-- Boundary-aware or side-channel structure
-  Why: public winners are using `BigramHash`, `SmearGate`, sliding evaluation, and similar nontrivial structure we have not tried.
+### 5-15 min: Write three causes
 
-### Unclear but worth sketching
+For each cause, answer: what part is likely wrong, and what would I expect to see if I’m right?
 
-- Salience-aware late correction instead of global correction
-- Localized QAT on a measured sensitive locus
-- Boundary-aware auxiliary features on the plain sequential winner
+Use this quick table:
 
-## 45-Minute Paper Drill
+| Miss | What changed | What likely got overcorrected | What to test next |
+|---|---|---|---|
+|  |  |  |  |
+|  |  |  |  |
 
-Goal:
+### 15-25 min: Point to the locus
 
-- leave with one hypothesis family
-- one minimal code change
-- one kill criterion
+For the best cause, name the exact entry point:
+- `input`
+- `state`
+- `boundary`
+- `quantization`
 
-Do not leave with five ideas. Leave with one run-worthy idea or none.
+If you cannot point to the file or code path, the idea is not ready.
 
-### Block 1: Failure Map (15 min)
+### 25-35 min: Define one patch
 
-Write down three memorable misses from this search.
+Write the smallest change that tests the idea: one patch, one smoke, no sweep.
 
-For each miss, label it as one of:
+### 35-45 min: Decide
 
-- `masked detail`
-- `threshold miss`
-- `regime switch`
+If it wins, write one next step. If it loses, kill it in one sentence.
 
-Then answer:
-
-- what was being overcorrected?
-- what was being blurred that probably mattered?
-- did the miss look like global overreach or wrong placement?
-
-### Block 2: Lever Classification (15 min)
-
-List every lever that still feels meaningful.
-
-Force each into exactly one bucket:
-
-- `gain`
-- `threshold`
-- `time constant`
-- `asymmetry`
-
-If a lever does not fit one of those, it is probably not the real mechanism.
-
-Then write:
-
-- which lever class has actually paid off locally?
-- which lever class have we mostly abused?
-
-Expected answer from the current evidence:
-
-- local wins came from coarse capacity allocation
-- local losses often came from global corrective gain or recurrence stories without enough specialization
-
-### Block 3: Salience Sketch (15 min)
-
-Draw a simple 2x2:
-
-- x-axis: `local salience`
-- y-axis: `model uncertainty`
-
-Now mark:
-
-- easy/common cases
-- rare/boundary cases
-- places where quantization probably destroys distinctions first
-
-Then answer:
-
-- where should the model spend extra bits or extra corrective structure?
-- where should it explicitly do less?
-- what should be preserved structurally even if fine detail dies?
-
-## Patterns To Look For
-
-Good signs:
-
-- the hypothesis changes *where* correction or extra structure appears, not only how much
-- the idea protects high-salience or boundary cases without globally blunting the state
-- the mechanism still makes sense after quantization
-- the mechanism can be tested with one narrow patch and one smoke
-
-Bad signs:
-
-- it is another scalar gain story
-- it depends on fine float-space geometry surviving exact int8 roundtrip
-- it asks for many coupled knob sweeps before yielding a falsifiable claim
-- it is mainly a story about recurrence even though plain sequential capacity currently wins
-
-## One-Slot Hypothesis Template
-
-Fill this out before touching code.
-
-### 1. Hypothesis Family
+## One Hypothesis
 
 Name:
 
+Exact locus + exact failure mode:
+
 One sentence:
 
-What qualitative mechanism changes?
+Minimal patch:
 
-### 2. Why It Could Move By Hundredths
-
-Why this is not a thousandth-shaving tweak:
-
-What current evidence supports trying it:
-
-What public evidence supports trying it:
-
-### 3. Minimal Patch
-
-Target file:
-
-Target code path:
-
-Minimal implementation:
-
-What I am explicitly **not** changing:
-
-### 4. Measurement
+Do **not** change: width, depth, serializer path, or anything unrelated.
 
 Smoke run id:
 
-Primary metric:
-
-Secondary metric:
-
 Expected win signal:
-
-### 5. Kill Criterion
 
 Kill immediately if:
 
-Do not promote if:
+Next step if it wins:
 
-### 6. Next Decision
+## Yes / No Check
 
-If smoke wins:
+Before you code, answer `yes` or `no`:
 
-If smoke loses:
+- Does this change *where* the model helps, not just how hard it pushes?
+- Does it still make sense after exact int8 re-encoding?
+- Can it be tested with one narrow patch?
+- Can you name the exact file and code path?
+- Can you kill it after one smoke if it misses?
 
-## Best Current Hypothesis Directions
+If any answer is `no`, do not run it.
 
-These are the best next families to sketch, not commitments to run.
+## Example Stub
 
-1. Boundary-aware side channel on the sequential winner
-   Examples: bigram-adjacent feature path, smear-like boundary signal, salience-conditioned late gate.
-
-2. Quantization-sensitive tensor treatment
-   Examples: fp16 tied embedding/head passthrough, localized QAT on the sensitive locus.
-
-3. Salience-aware soft-knee correction
-   Only if it is clearly boundary-local and not another global damping story.
-
-## Current Non-Goals
-
-Do not spend the next run on:
-
-- another width poke near `MODEL_DIM=512`
-- another depth poke
-- another attractor / stabilization / damping variant
-- another shared-core schedule micro-variation
-- more serializer/container work
-
-## Exit Condition
-
-If you cannot explain the new family in plain language and state a one-run kill criterion, do not run it.
+- Name: boundary-aware side channel on the sequential winner
+- Exact locus + failure mode: late correction is too global; rare or ambiguous positions need local help instead
+- Minimal patch: add one small salience-conditioned gate at the sensitive late locus in `train_gpt_mlx.py`
+- Kill immediately if: exact smoke does not beat `2.61172375`

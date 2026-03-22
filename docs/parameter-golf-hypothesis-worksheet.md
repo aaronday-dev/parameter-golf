@@ -2,13 +2,15 @@
 title: "Parameter Golf Hypothesis Worksheet"
 date: "2026-03-22"
 documentclass: extarticle
-geometry: margin=0.4in
+geometry: margin=0.5in
 classoption:
-  - 8pt
+  - 9pt
 header-includes:
+  - \usepackage{array}
+  - \usepackage{longtable}
   - \usepackage{titlesec}
-  - \titlespacing*{\section}{0pt}{0.5ex}{0.4ex}
-  - \titlespacing*{\subsection}{0pt}{0.4ex}{0.3ex}
+  - \titlespacing*{\section}{0pt}{0.7ex}{0.4ex}
+  - \titlespacing*{\subsection}{0pt}{0.5ex}{0.3ex}
   - \setlength{\parskip}{2pt}
   - \setlength{\parindent}{0pt}
   - \setlength{\tabcolsep}{4pt}
@@ -16,15 +18,31 @@ header-includes:
 
 # Parameter Golf Hypothesis Worksheet
 
-Use this only when the current line has plateaued and the next run needs a new mechanism.
+Use this when the next run needs a new idea, not another nearby tweak.
 
-## Header
+## What These Words Mean
+
+- **Parameter Golf**: the search for a small model that still scores well after compression under a hard artifact-size limit.
+- **Current winner**: the best full local run so far.
+- **Smoke baseline**: the cheap, short run used as the local reference point.
+- **Latest miss**: the most recent run that failed to beat the smoke baseline.
+- **Exact `val_bpb`**: the final score after the model has been re-encoded the same way the challenge scores it.
+- **Locus**: the exact place where the problem seems to enter. Use one of:
+  - **input**: the problem starts in the tokens or features going in
+  - **state**: the problem is in the model's internal representation while it is thinking
+  - **boundary**: the problem appears at edge cases, transitions, or ambiguous positions
+  - **quantization**: the problem appears when the trained model is compressed / re-encoded
+- **Patch**: the smallest code change that tests the idea.
+- **Smoke**: one quick run used to prove or kill the idea.
+- **Sweep**: many nearby runs. Do not do this first.
+
+## State Of Play
 
 Current winner:
 - `mlx_full_seq_mlp4x_200_realval_vb524k`
 - exact `val_bpb = 2.35796063`
 
-Current smoke baseline:
+Smoke baseline:
 - `mlx_seq_mlp4x_lzma_cmp_v2`
 - exact `val_bpb = 2.61172375`
 
@@ -32,86 +50,103 @@ Latest miss:
 - `mlx_seq_dim528_mlp4x_lzma_cmp_v1`
 - exact `val_bpb = 2.61440332`
 
-One-line read:
-- `MLP_MULT` helped; width missed; depth missed; shared-core cleverness lost to plain sequential capacity.
+## Why The Current Read Is What It Is
 
-## What Changed
+| Claim | Why we currently believe it |
+|---|---|
+| `MLP_MULT` helped | Sequential `MLP_MULT=4` beat sequential `MLP_MULT=3` on smoke (`2.6117` vs `2.6172`) and on the promoted run (`2.3580` vs `2.3733`). |
+| Width missed | `MODEL_DIM=528, MLP_MULT=4` lost to the `MODEL_DIM=512` smoke baseline (`2.6144` vs `2.6117`). |
+| Depth missed | More mirrored depth regressed badly (`2.6769`) instead of helping. |
+| Plain sequential beat shared-core cleverness | The best promoted sequential run (`2.3580`) beat the best promoted shared-core run (`2.3813`). |
+| Damping / attractor controls are downranked | They repeatedly made the exact post-compression score worse, even when they looked cleaner internally. |
 
-- Helped: coarse capacity on the plain sequential winner
-- Failed: width, depth, damping / attractor controls, more shared-core recurrence
-- Still open: signals that help on edge cases; some parts survive re-encoding better than others
+Short honest read:
 
-## 45-Minute Flow
+- Coarse capacity helped.
+- Nearby width and depth pokes did not.
+- Shared-core recurrence is no longer the lead story on this local track.
+- The open space is not "more of the same." It is a different mechanism.
 
-### 0-5 min: Name the miss
+## Decision Card
 
-Pick one recent bad or flat run.
-Write one sentence: what changed, where it showed up, why it mattered.
+### 1. Name The Problem
 
-### 5-15 min: Write three causes
+Recent miss I am thinking from:
 
-For each cause, answer: what part is likely wrong, and what would I expect to see if I’m right?
+What changed:
 
-Use this quick table:
+Where it showed up:
 
-| Miss | What changed | What likely got overcorrected | What to test next |
-|---|---|---|---|
-|  |  |  |  |
-|  |  |  |  |
+Why it mattered:
 
-### 15-25 min: Point to the locus
-
-For the best cause, name the exact entry point:
-- `input`
-- `state`
-- `boundary`
-- `quantization`
-
-If you cannot point to the file or code path, the idea is not ready.
-
-### 25-35 min: Define one patch
-
-Write the smallest change that tests the idea: one patch, one smoke, no sweep.
-
-### 35-45 min: Decide
-
-If it wins, write one next step. If it loses, kill it in one sentence.
-
-## One Hypothesis
+### 2. One Hypothesis
 
 Name:
 
-Exact locus + exact failure mode:
+Exact locus:
 
-One sentence:
+Exact failure mode:
 
-Minimal patch:
+Why this is plausible *now*:
 
-Do **not** change: width, depth, serializer path, or anything unrelated.
+What result would disprove it immediately:
+
+### 3. Minimal Patch
+
+What is the smallest code change that tests this?
+
+Files / functions it touches:
+
+What must stay unchanged:
+
+### 4. Smoke
 
 Smoke run id:
 
-Expected win signal:
+What counts as a win:
 
-Kill immediately if:
+What exact result kills the idea:
 
-Next step if it wins:
+### 5. Decision
 
-## Yes / No Check
+If it wins, the next single step is:
 
-Before you code, answer `yes` or `no`:
+If it loses, I stop doing:
 
-- Does this change *where* the model helps, not just how hard it pushes?
-- Does it still make sense after exact int8 re-encoding?
-- Can it be tested with one narrow patch?
-- Can you name the exact file and code path?
-- Can you kill it after one smoke if it misses?
+## Quick Reality Check
 
-If any answer is `no`, do not run it.
+Answer `yes` or `no`:
 
-## Example Stub
+- Can I point to the exact file or function?
+- Does this change where the model helps, not just how strongly it pushes?
+- Does the idea still make sense after exact re-encoding?
+- Can one smoke run prove or kill it?
+- Am I testing a mechanism, not just a knob?
 
-- Name: boundary-aware side channel on the sequential winner
-- Exact locus + failure mode: late correction is too global; rare or ambiguous positions need local help instead
-- Minimal patch: add one small salience-conditioned gate at the sensitive late locus in `train_gpt_mlx.py`
-- Kill immediately if: exact smoke does not beat `2.61172375`
+If any answer is `no`, do not run it yet.
+
+## Example
+
+Name:
+- boundary-aware side signal on the sequential winner
+
+Exact locus:
+- boundary positions in the late correction path
+
+Exact failure mode:
+- rare or ambiguous positions are being over-smoothed by a correction that is too global
+
+Why this is plausible now:
+- the current local line improved with more useful capacity, but global corrective ideas mostly failed; public winners are also using edge-case-aware signals such as bigram-side features
+
+Minimal patch:
+- add one small boundary-conditioned gate at the sensitive late locus in `train_gpt_mlx.py`
+
+What must stay unchanged:
+- width, depth, serializer path, and unrelated trainer plumbing
+
+What counts as a win:
+- exact smoke beats `2.61172375`
+
+What kills it:
+- exact smoke does not beat baseline on the first run

@@ -1113,3 +1113,19 @@ Practical implication:
 
 - the storage-format issue is no longer the active bottleneck
 - future search should treat `lzma` as the default artifact path and focus back on model quality per byte, not on serializer rescue work
+
+## Iteration Annotation: Hypothesis Worksheet Added
+
+The search has now reached the point where additional nearby local runs are less valuable than one good new mechanism.
+
+To make that explicit, a dedicated worksheet now lives here:
+
+- `docs/parameter-golf-hypothesis-worksheet.md`
+
+Its role is simple:
+
+- record the current dead / alive / unclear map
+- force a 45-minute paper session before the next run family
+- require a one-slot hypothesis template with a kill criterion
+
+This is a guardrail against another round of local thousandth-shaving on a family that is already flattening.

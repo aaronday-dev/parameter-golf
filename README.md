@@ -114,6 +114,7 @@ OpenAI Parameter Golf codebase. See:
 The main running log lives in:
 
 - `docs/parameter-golf-research-log.md`
+- `docs/parameter-golf-hypothesis-worksheet.md`
 
 Current practical takeaway:
 

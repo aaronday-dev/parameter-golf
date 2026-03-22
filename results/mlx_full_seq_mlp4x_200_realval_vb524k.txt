@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import glob
 import json
-import lzma
 import math
 import os
 import pickle
@@ -1338,25 +1337,6 @@ INT8_KEEP_FLOAT_STORE_DTYPE = np.float16
 INT8_PER_ROW_SCALE_DTYPE = np.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
-INT8_COMPRESSOR = os.environ.get("INT8_COMPRESSOR", "lzma").strip().lower()
-INT8_COMPRESSOR_EXT = {"zlib": ".ptz", "lzma": ".ptx"}
-
-
-def compress_quant_blob(raw: bytes) -> tuple[str, bytes]:
-    if INT8_COMPRESSOR == "zlib":
-        return INT8_COMPRESSOR, zlib.compress(raw, level=9)
-    if INT8_COMPRESSOR == "lzma":
-        return INT8_COMPRESSOR, lzma.compress(raw, preset=(9 | lzma.PRESET_EXTREME))
-    raise ValueError(f"Unsupported INT8_COMPRESSOR={INT8_COMPRESSOR!r}; use zlib or lzma")
-
-
-def decompress_quant_blob(blob: bytes) -> tuple[str, bytes]:
-    if blob.startswith(b"\xfd7zXZ\x00"):
-        return "lzma", lzma.decompress(blob)
-    try:
-        return "zlib", zlib.decompress(blob)
-    except zlib.error as exc:
-        raise ValueError("Unsupported int8 artifact compression format") from exc
 
 
 def _np_float32(arr: mx.array) -> np.ndarray:
@@ -1969,23 +1949,22 @@ def main() -> None:
 
     quant_obj, quant_stats = quantize_state_dict_int8(flat_state)
     quant_raw = pickle.dumps(quant_obj, protocol=pickle.HIGHEST_PROTOCOL)
-    compressor_name, quant_blob = compress_quant_blob(quant_raw)
+    quant_blob = zlib.compress(quant_raw, level=9)
     quant_serialized_bytes = len(quant_raw)
-    quant_path = out_dir / f"{args.run_id}_mlx_model.int8{INT8_COMPRESSOR_EXT[compressor_name]}"
+    quant_path = out_dir / f"{args.run_id}_mlx_model.int8.ptz"
     with quant_path.open("wb") as f:
         f.write(quant_blob)
     quant_file_bytes = quant_path.stat().st_size
     ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
     log(
-        f"serialized_model_int8_{compressor_name}:{quant_file_bytes} bytes "
+        f"serialized_model_int8_zlib:{quant_file_bytes} bytes "
         f"(payload:{quant_stats['int8_payload_bytes']} raw_pickle:{quant_serialized_bytes} payload_ratio:{ratio:.2f}x)"
     )
 
     if args.verify_quantized_roundtrip:
         with quant_path.open("rb") as f:
             quant_blob_disk = f.read()
-        roundtrip_compressor, quant_raw_disk = decompress_quant_blob(quant_blob_disk)
-        quant_flat = dequantize_state_dict_int8(pickle.loads(quant_raw_disk))
+        quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
         model.update(tree_unflatten(list(quant_flat.items())))
         q_t0 = time.perf_counter()
         q_val_loss, q_val_bpb = eval_val(
@@ -1998,11 +1977,58 @@ def main() -> None:
             log_fn=log,
         )
         q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
-        log(f"final_int8_{roundtrip_compressor}_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
-        log(f"final_int8_{roundtrip_compressor}_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+        log(f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
+        log(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
     else:
-        log("final_int8_roundtrip skipped verify_quantized_roundtrip:False")
+        log("final_int8_zlib_roundtrip skipped verify_quantized_roundtrip:False")
 
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.11.11 (main, Dec  9 2025, 11:22:44) [Clang 15.0.0 (clang-1500.1.0.2.5)]
+Running MLX 0.31.1
+====================================================================================================
+run_id:mlx_full_seq_mlp4x_200_realval_vb524k
+mlx_version:0.31.1
+train_loader:shards pattern=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/datasets/fineweb10B_sp1024/fineweb_train_*.bin
+val_loader:shards pattern=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/datasets/fineweb10B_sp1024/fineweb_val_*.bin tokens:62021632
+WARNING: train_loader:subset dataset:fineweb10B_sp1024 train_shards:1/195 new epochs will arrive sooner than the full dataset
+tokenizer_path:/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/tokenizers/fineweb_1024_bpe.model
+model_params:26497096 vocab_size:1024 layers:9 dim:512 heads:8 kv_heads:4 seq_len:1024 tie_embeddings:True
+shared_core:enabled:False unique_blocks:9 schedule:cyclic custom_schedule:- layer_to_block:0,1,2,3,4,5,6,7,8 layer_is_revisit:0,0,0,0,0,0,0,0,0 step_scales:False pass_x0_scales:False revisit_gains:False revisit_count_gains:False revisit_damping:0.000 phase_split_revisit_gain:False revisit_gains_encoder:False revisit_gains_decoder:False role_gains:- correct_block:- correct_gain:0.000 adaptive_correct:False adaptive_correct_block:- adaptive_correct_sources:- adaptive_correct_revisit_only:True adaptive_correct_max_gain:0.000 adaptive_correct_target_amp:1.000 adaptive_correct_log_band:1.000 directional_correct:False directional_correct_block:- directional_correct_sources:- directional_correct_revisit_only:True directional_correct_max_gain:0.000 directional_correct_target_amp:1.000 directional_correct_log_band:1.000 directional_stress_guard:False directional_stress_band:1.000 directional_stress_min_factor:1.000 orbit_gate:False orbit_gate_block:- orbit_gate_steps:1 orbit_gate_revisit_only:True attractor_pulse:False attractor_pulse_block:- attractor_pulse_steps:1 attractor_pulse_gain:0.000 attractor_pulse_trigger_amp:inf attractor_pulse_margin:0.000 attractor_pulse_revisit_only:True mirror_cancel:False mirror_cancel_block:- mirror_cancel_threshold:inf mirror_cancel_revisit_only:True stabilize_every:0 stabilize_after:0 stabilize_gain:0.000
+iterations:200 train_batch_tokens:8192 grad_accum_steps:8 microbatch_tokens:1024 microbatch_batch_size:1 val_max_batch_tokens:524288 verify_quantized_roundtrip:True warmup_steps:0 max_wallclock_seconds:600.000
+mlx_max_microbatch_tokens:8192
+optimizer:muon+adam muon_matrix_params:54 scalar_params:37 embed_lr:0.05 matrix_lr:0.04 scalar_lr:0.04 muon_momentum:0.95 muon_steps:5
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=/Users/aaronday/dev/discrete-mathematics-for-formal-system-design/parameter-golf/data/tokenizers/fineweb_1024_bpe.model
+compute_dtype:mlx.core.bfloat16 compile:True
+dtypes tok_emb:mlx.core.bfloat16 linear_weight:mlx.core.float32 skip_weights:mlx.core.float32
+step:1/200 train_loss:6.9428 train_time:208ms step_avg:208.41ms tok_s:39308
+step:2/200 train_loss:18.7168 train_time:844ms step_avg:422.10ms tok_s:12888
+step:3/200 train_loss:14.1303 train_time:1459ms step_avg:486.24ms tok_s:13337
+step:4/200 train_loss:9.7108 train_time:2094ms step_avg:523.43ms tok_s:12910
+step:5/200 train_loss:7.6723 train_time:2733ms step_avg:546.51ms tok_s:12827
+step:6/200 train_loss:6.9851 train_time:3372ms step_avg:562.01ms tok_s:12816
+step:7/200 train_loss:6.7198 train_time:3993ms step_avg:570.39ms tok_s:13204
+step:8/200 train_loss:6.6532 train_time:4609ms step_avg:576.09ms tok_s:13304
+step:9/200 train_loss:6.5174 train_time:5224ms step_avg:580.42ms tok_s:13325
+step:10/200 train_loss:6.3497 train_time:5836ms step_avg:583.57ms tok_s:13392
+step:200/200 train_loss:3.8599 train_time:118116ms step_avg:590.58ms tok_s:14423
+val_progress:1/119
+val_progress:25/119
+val_progress:50/119
+val_progress:75/119
+val_progress:100/119
+val_progress:119/119
+step:200/200 val_loss:3.9797 val_bpb:2.3570 train_time:118116ms step_avg:590.58ms
+saved_model:logs/mlx_full_seq_mlp4x_200_realval_vb524k_mlx_model.npz bytes:104960924
+serialized_model_int8_zlib:16058657 bytes (payload:26634528 raw_pickle:26643977 payload_ratio:3.94x)
+val_progress:1/119
+val_progress:25/119
+val_progress:50/119
+val_progress:75/119
+val_progress:100/119
+val_progress:119/119
+final_int8_zlib_roundtrip val_loss:3.9813 val_bpb:2.3580 eval_time:1378693ms
+final_int8_zlib_roundtrip_exact val_loss:3.98131775 val_bpb:2.35796063

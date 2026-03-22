@@ -70,7 +70,7 @@ def parse_run_metadata(log_path: Path) -> dict[str, object]:
         "shared_core_revisit_count_gain": revisit_count_match == "True",
         "shared_core_revisit_damping": float(damping_match) if damping_match is not None else 0.0,
         "shared_core_phase_split_revisit_gain": phase_split_match == "True",
-        "val_bpb": float(find_match(text, r"final_int8_zlib_roundtrip_exact val_loss:[0-9.]+ val_bpb:([0-9.]+)", "val_bpb")),
+        "val_bpb": float(find_match(text, r"final_int8_(?:zlib|lzma)_roundtrip_exact val_loss:[0-9.]+ val_bpb:([0-9.]+)", "val_bpb")),
     }
 
 

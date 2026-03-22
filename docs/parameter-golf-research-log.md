@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-21
+Last updated: 2026-03-22
 
 ## Purpose
 
@@ -24,23 +24,27 @@ Presentation note:
 
 ## Current Status Snapshot
 
-As of `2026-03-21`, the work has split into two distinct tracks:
+As of `2026-03-22`, the work has split into two distinct tracks:
 
 - model-search track: shared-core recurrence, mirror scheduling, resonance probes, and directional `C` correction
 - trainer-correctness track: making the local MLX and torch scripts tell the truth about evaluation, wallclock, and final verification
 
 The current best promoted architectural result is now the MLX real-data promotion:
 
-- `mlx_full_seq_mlp3x_200_realval_vb524k`
-- exact `final_int8_zlib_roundtrip val_bpb = 2.37334218`
-- compressed artifact size: `13,534,421` bytes
+- `mlx_full_seq_mlp4x_200_realval_vb524k`
+- exact `val_bpb = 2.35796063`
+- original run artifact with `zlib`: `16,058,657` bytes
+- same exact quantized payload re-encoded with `lzma`: `14,849,696` bytes
 
-That displaced the earlier shared-core leaders:
+That displaced the earlier local leaders:
 
-- `mlx_full_mirror_dirc02_200_realval` at `2.38989686`
+- `mlx_full_seq_mlp3x_200_realval_vb524k` at `2.37334218`
 - `mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k` at `2.38131855`
+- `mlx_full_mirror_dirc02_200_realval` at `2.38989686`
 
-The current evidence says straightforward sequential capacity is now beating the best shared-core recurrence family on this local track.
+The current evidence says straightforward sequential capacity is now beating the best shared-core recurrence family on this local track, and `MLP_MULT=4` was the next coarse capacity step that paid off.
+
+The trainer files now default to `lzma` for the compressed int8 artifact while still being able to read older `zlib` artifacts.
 
 The torch work on `2026-03-21` was not new model search. It was semantic cleanup and local verification:
 

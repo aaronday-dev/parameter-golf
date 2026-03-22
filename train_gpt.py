@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import glob
 import io
+import lzma
 import math
 import os
 import platform
@@ -380,6 +381,26 @@ INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
+INT8_COMPRESSOR = os.environ.get("INT8_COMPRESSOR", "lzma").strip().lower()
+INT8_COMPRESSOR_EXT = {"zlib": ".ptz", "lzma": ".ptx"}
+
+
+def compress_quant_blob(raw: bytes) -> tuple[str, bytes]:
+    if INT8_COMPRESSOR == "zlib":
+        return INT8_COMPRESSOR, zlib.compress(raw, level=9)
+    if INT8_COMPRESSOR == "lzma":
+        return INT8_COMPRESSOR, lzma.compress(raw, preset=(9 | lzma.PRESET_EXTREME))
+    raise ValueError(f"Unsupported INT8_COMPRESSOR={INT8_COMPRESSOR!r}; use zlib or lzma")
+
+
+def decompress_quant_blob(blob: bytes) -> tuple[str, bytes]:
+    if blob.startswith(b"\xfd7zXZ\x00"):
+        return "lzma", lzma.decompress(blob)
+    try:
+        return "zlib", zlib.decompress(blob)
+    except zlib.error as exc:
+        raise ValueError("Unsupported int8 artifact compression format") from exc
+
 
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
@@ -2039,26 +2060,28 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
+    compressor_name, quant_blob = compress_quant_blob(quant_raw)
     quant_raw_bytes = len(quant_raw)
+    quant_filename = f"final_model.int8{INT8_COMPRESSOR_EXT[compressor_name]}"
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        with open(quant_filename, "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize(quant_filename)
         code_bytes = len(code.encode("utf-8"))
         ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
         log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
+            f"Serialized model int8+{compressor_name}: {quant_file_bytes} bytes "
             f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
         )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Total submission size int8+{compressor_name}: {quant_file_bytes + code_bytes} bytes")
 
     if distributed:
         dist.barrier()
     if args.verify_quantized_roundtrip:
-        with open("final_model.int8.ptz", "rb") as f:
+        with open(quant_filename, "rb") as f:
             quant_blob_disk = f.read()
-        quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
+        roundtrip_compressor, quant_raw_disk = decompress_quant_blob(quant_blob_disk)
+        quant_state = torch.load(io.BytesIO(quant_raw_disk), map_location="cpu")
         base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
         synchronize_device()
         t_qeval = time.perf_counter()
@@ -2075,12 +2098,12 @@ def main() -> None:
         )
         synchronize_device()
         log0(
-            f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
+            f"final_int8_{roundtrip_compressor}_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
             f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
         )
-        log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+        log0(f"final_int8_{roundtrip_compressor}_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
     else:
-        log0("final_int8_zlib_roundtrip skipped verify_quantized_roundtrip:False")
+        log0("final_int8_roundtrip skipped verify_quantized_roundtrip:False")
 
     if distributed:
         dist.destroy_process_group()

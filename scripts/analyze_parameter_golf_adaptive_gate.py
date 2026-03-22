@@ -128,7 +128,7 @@ def parse_run_metadata(log_path: Path) -> dict[str, object]:
         "shared_core_stabilize_every": int(find_last_optional(text, r"\bstabilize_every:(\d+)") or 0),
         "shared_core_stabilize_after": int(find_last_optional(text, r"\bstabilize_after:(\d+)") or 0),
         "shared_core_stabilize_gain": float(find_last_optional(text, r"\bstabilize_gain:([0-9.]+)") or 0.0),
-        "val_bpb": float(find_last_match(text, r"final_int8_zlib_roundtrip_exact val_loss:[0-9.]+ val_bpb:([0-9.]+)", "val_bpb")),
+        "val_bpb": float(find_last_match(text, r"final_int8_(?:zlib|lzma)_roundtrip_exact val_loss:[0-9.]+ val_bpb:([0-9.]+)", "val_bpb")),
     }
 
 

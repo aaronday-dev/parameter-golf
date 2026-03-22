@@ -14,23 +14,26 @@ The main focus is simple:
 
 Best exact real-data result currently in this repo:
 
-- run: `mlx_full_seq_mlp3x_200_realval_vb524k`
-- exact `final_int8_zlib_roundtrip_exact val_bpb = 2.37334218`
-- compressed artifact size: `13,534,421` bytes
+- run: `mlx_full_seq_mlp4x_200_realval_vb524k`
+- exact `val_bpb = 2.35796063`
+- compressed artifact size: `14,849,696` bytes with the same quantized payload re-encoded via `lzma`
 - hardware: Apple Silicon M4 via MLX / Metal
 
 Earlier milestones:
 
-- shared-core mirror + directional correction:
-  `2.38989686`
+- plain sequential `MLP_MULT=3`:
+  `2.37334218`
 - shared-core mirror + directional correction + `MLP_MULT=3`:
   `2.38131855`
+- shared-core mirror + directional correction:
+  `2.38989686`
 
 Current local conclusion:
 
 - increasing useful capacity helped
 - extra recurrence and contraction-style controls mostly did not
-- the best local result now comes from a plain sequential `MLP_MULT=3` model
+- moving the plain sequential winner from `MLP_MULT=3` to `MLP_MULT=4` produced the latest real-data gain
+- artifact compression now defaults to `lzma`, while old `zlib` artifacts remain readable
 
 ## What This Repo Contains
 

@@ -1,0 +1,19 @@
+run_id:mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1
+result_type:offline_artifact_eval
+archived_on:2026-03-23
+source_log:/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2.txt
+source_result_json:/Users/aaronday/dev/parameter-golf/results/residual_sidecar_rank64_fullval.json
+source_float_artifact:/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz
+carrier_summary:a rank-64 fp16 residual sidecar
+target_tensor:blocks.0.mlp.proj.weight
+rank:64
+exact_val_bpb:2.35570158
+artifact_bytes:15109864
+artifact_budget_margin_bytes:890136
+val_tokens:62021632
+source_exact_val_bpb:2.35551193
+control_run:mlx_full_seq_mlp4x_200_realval_vb524k
+control_exact_val_bpb:2.35796063
+
+This is an offline derived artifact evaluation, not a new training run.
+It preserves the source model topology and training provenance, then swaps in a derived carrier at artifact time.

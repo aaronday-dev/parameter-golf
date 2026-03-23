@@ -14,9 +14,9 @@ The main focus is simple:
 
 Best exact real-data result currently in this repo:
 
-- run: `mlx_full_seq_mlp4x_200_realval_vb524k`
-- exact `val_bpb = 2.35796063`
-- compressed artifact size: `14,849,696` bytes with the same quantized payload re-encoded via `lzma`
+- run: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- exact `val_bpb = 2.35570158`
+- compressed artifact size: `15,109,864` bytes via `lzma` from an offline rank-64 residual sidecar on `blocks.0.mlp.proj.weight`
 - hardware: Apple Silicon M4 via MLX / Metal
 
 Earlier milestones:
@@ -34,6 +34,7 @@ Current local conclusion:
 - extra recurrence and contraction-style controls mostly did not
 - moving the plain sequential winner from `MLP_MULT=3` to `MLP_MULT=4` produced the latest real-data gain
 - artifact compression now defaults to `lzma`, while old `zlib` artifacts remain readable
+- the current capped local leader is no longer a plain retrain; it is an offline derived carrier that preserves most of the sacred-tensor gain under the byte cap
 
 ## What This Repo Contains
 
@@ -75,6 +76,13 @@ appropriate:
 
 ```bash
 python3 scripts/archive_parameter_golf_run.py RUN_ID
+```
+
+To archive an offline derived artifact result into the same `results/` / `results/reports/`
+shape:
+
+```bash
+python3 scripts/archive_parameter_golf_offline_result.py RUN_ID ...
 ```
 
 To render a normalized report for a single archived run:

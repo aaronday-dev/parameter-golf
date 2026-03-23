@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-22
+Last updated: 2026-03-23
 
 ## Purpose
 
@@ -24,17 +24,23 @@ Presentation note:
 
 ## Current Status Snapshot
 
-As of `2026-03-22`, the work has split into two distinct tracks:
+As of `2026-03-23`, the work has split into two distinct tracks:
 
 - model-search track: shared-core recurrence, mirror scheduling, resonance probes, and directional `C` correction
 - trainer-correctness track: making the local MLX and torch scripts tell the truth about evaluation, wallclock, and final verification
 
-The current best promoted architectural result is now the MLX real-data promotion:
+The current best capped verified local result is now an offline derived whole-tensor carrier:
 
-- `mlx_full_seq_mlp4x_200_realval_vb524k`
-- exact `val_bpb = 2.35796063`
-- original run artifact with `zlib`: `16,058,657` bytes
-- same exact quantized payload re-encoded with `lzma`: `14,849,696` bytes
+- `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- exact `val_bpb = 2.35570158`
+- compressed artifact size: `15,109,864` bytes via `lzma`
+- carrier: rank-64 residual sidecar on `blocks.0.mlp.proj.weight`
+
+The best over-budget local result remains:
+
+- `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2`
+- exact `val_bpb = 2.35551193`
+- compressed artifact size: `16,263,292` bytes via `lzma`
 
 That displaced the earlier local leaders:
 
@@ -42,7 +48,7 @@ That displaced the earlier local leaders:
 - `mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k` at `2.38131855`
 - `mlx_full_mirror_dirc02_200_realval` at `2.38989686`
 
-The current evidence says straightforward sequential capacity is now beating the best shared-core recurrence family on this local track, and `MLP_MULT=4` was the next coarse capacity step that paid off.
+The current evidence says straightforward sequential capacity is still the right base family locally, but the latest capped gain now comes from offline artifact design rather than another architectural retrain.
 
 The trainer files now default to `lzma` for the compressed int8 artifact while still being able to read older `zlib` artifacts.
 

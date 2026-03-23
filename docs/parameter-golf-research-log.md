@@ -1756,6 +1756,78 @@ Current read after this result:
 - the problem is no longer "does a cheaper whole-tensor carrier exist?"
 - it is now "can a more structured carrier beat rank-64 residual sidecar under the same cap?"
 
+## Iteration Annotation: Naive Column Tiling Does Not Beat Global Rank-64
+
+The next carrier family after the capped rank-64 residual sidecar winner was a simple block-local variant:
+
+- same sacred tensor:
+  - `blocks.0.mlp.proj.weight`
+- same offline artifact-only setup
+- but instead of one global residual factorization, split the tensor into column tiles
+- fit one low-rank residual sidecar per tile
+
+Implementation:
+
+- `train_gpt_mlx.py`
+  - dequantizer now also supports `residual_tiled_low_rank_v1`
+- `scripts/sweep_tiled_residual_sidecar.py`
+  - offline sweep over tile widths and per-tile ranks
+
+This first tiled pass intentionally stayed simple:
+
+- tile widths:
+  - `1024`
+  - `512`
+- per-tile ranks:
+  - `16, 24, 32, 40, 48, 64`
+- eval slice:
+  - `128` sequences from the full local validation set
+
+Reference points on the same slice:
+
+- keep-float sacred baseline:
+  - artifact `16,263,292`
+  - `val_bpb = 2.39749507`
+- plain quant baseline:
+  - artifact `14,813,572`
+  - `val_bpb = 2.39789063`
+- global residual sidecar best:
+  - rank `64`
+  - artifact `15,109,864`
+  - `val_bpb = 2.39777665`
+
+Best tiled result:
+
+- tile width `1024`
+- rank `32` per tile
+- artifact `14,991,684`
+- `val_bpb = 2.39779253`
+
+That means:
+
+- it beat plain quant by about `-0.00009810`
+- but it still lost to the global rank-64 sidecar by about `+0.00001588`
+
+The smaller `512`-column tiling did worse:
+
+- most `512`-tile candidates were at or above plain quant
+- even the best `512`-tile variant did not materially challenge the global carrier
+
+So the update is:
+
+- naive column-local tiling is not enough
+- more locality by itself did not beat the current global rank-64 carrier
+- the next structured-carrier step, if this line continues, should not just be "more tiles"
+
+Current recommendation after this branch:
+
+- keep the capped rank-64 residual sidecar as the live leader
+- downrank naive column-tiled low-rank residuals
+- if Claude or future local work pushes further, the next structured carrier should likely be:
+  - mixed global + local residual
+  - or a codebook / PQ-style carrier
+  - or a tiling aligned to learned structure rather than uniform fixed-width columns
+
 ## Iteration Annotation: Residual Sidecars Fit The Budget, But Not The Gain
 
 The next whole-tensor carrier family after the failed attention-sacrifice sweeps was the most direct linear-algebra baseline:

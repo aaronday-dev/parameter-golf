@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Parameter Golf Report: mlx_seq_mlp4x_keepf_block0proj_v1</title>
+  <style>
+    :root {
+      --bg: #f5efe6;
+      --surface: rgba(255, 252, 247, 0.82);
+      --surface-strong: #fffaf3;
+      --border: rgba(49, 39, 24, 0.14);
+      --text: #2d241a;
+      --text-dim: #6b5e4f;
+      --accent: #9f3c12;
+      --accent-soft: rgba(159, 60, 18, 0.12);
+      --blue: #20405f;
+      --good: #2b6d46;
+      --shadow: 0 18px 48px rgba(49, 39, 24, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font: 16px/1.55 "IBM Plex Sans", "Avenir Next", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(159, 60, 18, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(32, 64, 95, 0.10), transparent 26%),
+        linear-gradient(180deg, #faf5ee 0%, #f1e8dc 100%);
+    }
+    main {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 32px 20px 72px;
+    }
+    .hero, .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+      margin-bottom: 20px;
+    }
+    .hero {
+      padding: 30px;
+    }
+    .hero-grid, .card-grid {
+      display: grid;
+      gap: 18px;
+    }
+    .hero-grid {
+      grid-template-columns: 1.2fr 0.8fr;
+    }
+    .card-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      border-radius: 18px;
+      padding: 16px;
+      background: var(--surface-strong);
+      border: 1px solid var(--border);
+    }
+    .metric-label {
+      color: var(--text-dim);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .metric-value {
+      color: var(--blue);
+      font: 700 28px/1.05 "IBM Plex Mono", "SFMono-Regular", monospace;
+    }
+    .eyebrow {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+    h1, h2 {
+      margin: 0 0 10px;
+      font-family: "Bricolage Grotesque", "Avenir Next", sans-serif;
+    }
+    h1 {
+      font-size: 42px;
+      line-height: 1.02;
+      max-width: 16ch;
+    }
+    h2 {
+      font-size: 26px;
+    }
+    p, li {
+      color: var(--text-dim);
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .card {
+      padding: 22px;
+    }
+    code {
+      color: var(--blue);
+      font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      word-break: break-word;
+    }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    @media (max-width: 920px) {
+      .hero-grid, .card-grid, .kpis {
+        grid-template-columns: 1fr;
+      }
+      h1 {
+        font-size: 34px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">Parameter Golf Run Report</div>
+      <div class="hero-grid">
+        <div>
+          <h1>Parameter Golf Report: mlx_seq_mlp4x_keepf_block0proj_v1</h1>
+          <p>Normalized single-run view for architecture, compression, and post-roundtrip evaluation.</p>
+          <p>This is the reusable part worth stealing from the MoE workflow: one run, one normalized view of architecture, compression, and post-roundtrip truth.</p>
+          <div>
+            <span class="pill">mlx_seq_mlp4x_keepf_block0proj_v1</span>
+            <span class="pill">sequential</span>
+            <span class="pill">storage:lzma</span>
+            <span class="pill">roundtrip:lzma</span>
+          </div>
+        </div>
+        <div class="kpis">
+          <div class="metric"><div class="metric-label">Exact val_bpb</div><div class="metric-value">2.61001513</div></div>
+          <div class="metric"><div class="metric-label">Artifact bytes</div><div class="metric-value">14,858,772</div></div>
+          <div class="metric"><div class="metric-label">Budget margin</div><div class="metric-value">1,141,228</div></div>
+          <div class="metric"><div class="metric-label">Validation tokens</div><div class="metric-value">1,047,552</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Headline findings</h2>
+      <ul><li>Exact post-roundtrip val_bpb is 2.61001513 on a lzma roundtrip.</li><li>The archived log reports a lzma artifact at 14,858,772 bytes.</li><li>The compressed artifact is under the decimal 16,000,000-byte cap by 1,141,228 bytes.</li><li>Quantized roundtrip changed val_bpb by +0.00031513 relative to the final in-run validation.</li><li>The run is a sequential architecture with 9 layers, dim 512, and schedule `cyclic`.</li><li>This is a smoke-scale result over 1,047,552 validation tokens.</li></ul>
+    </section>
+
+    <section class="card">
+      <h2>Model and architecture</h2>
+      <div class="card-grid">
+        <div>
+          <p><strong>Params:</strong> <code>26,497,096</code></p>
+          <p><strong>Topology:</strong> <code>9L / dim 512 / 8 heads / 4 kv</code></p>
+          <p><strong>Seq len:</strong> <code>1024</code></p>
+        </div>
+        <div>
+          <p><strong>Family:</strong> <code>sequential</code></p>
+          <p><strong>Schedule:</strong> <code>cyclic</code></p>
+          <p><strong>Unique blocks:</strong> <code>9</code></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Compression and evaluation</h2>
+      <div class="card-grid">
+        <div>
+          <p><strong>Storage compressor:</strong> <code>lzma</code></p>
+          <p><strong>Compressed model:</strong> <code>14,858,772</code> bytes</p>
+          <p><strong>Payload bytes:</strong> <code>27,682,080</code></p>
+          <p><strong>Payload ratio:</strong> <code>3.79x</code></p>
+          <p><strong>Budget status:</strong> <code>within_budget</code></p>
+          <p><strong>Storage source:</strong> <code>log</code></p>
+        </div>
+        <div>
+          <p><strong>Roundtrip compressor:</strong> <code>lzma</code></p>
+          <p><strong>Final in-run val_bpb:</strong> <code>2.60970000</code></p>
+          <p><strong>Exact roundtrip val_bpb:</strong> <code>2.61001513</code></p>
+          <p><strong>Roundtrip penalty:</strong> <code>0.00031513</code></p>
+          <p><strong>Roundtrip eval time:</strong> <code>13,406</code> ms</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Source artifacts</h2>
+      <ul><li>/Users/aaronday/dev/parameter-golf/results/mlx_seq_mlp4x_keepf_block0proj_v1.txt</li></ul>
+    </section>
+  </main>
+</body>
+</html>

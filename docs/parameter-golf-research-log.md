@@ -1129,3 +1129,315 @@ Its role is simple:
 - require a one-slot hypothesis template with a kill criterion
 
 This is a guardrail against another round of local thousandth-shaving on a family that is already flattening.
+
+## Iteration Annotation: Quantizer Floor Stress Is Real, But The First Exception Still Lost
+
+This iteration started from a useful external read rather than a new training mechanism.
+
+The proposed update was:
+
+- large 2D tensors may be over-quantized by the current fixed per-row floor
+- maybe the next "salience field exception" is not architectural at all
+- maybe one tensor family deserves a non-generic quantization rule
+
+The concrete claim from the tensor-atlas pass was:
+
+- for big matrix families like `mlp.proj`, `mlp.fc`, and `attn.c_q`, the natural per-row scale is below the current fixed floor
+- therefore the current rule
+  - `scale = max(clip_abs / 127, 1 / 127)`
+  is often dominated by `1 / 127`
+- this means a large share of the int8 grid is unused on those tensors
+
+Local verification on the best full artifact confirmed the narrow factual part.
+
+On the current best promoted line:
+
+- `logs/mlx_full_seq_mlp4x_200_realval_vb524k_mlx_model.npz`
+
+sample checks showed:
+
+- `blocks.0.mlp.proj.weight`
+  - natural median / max row scale about `0.00093 / 0.00170`
+  - current floor scale `0.007874`
+  - current max code usage only about `15-27` out of `127`
+- `blocks.0.mlp.fc.weight`
+  - natural median / max row scale about `0.00121 / 0.00324`
+  - current max code usage about `20-52`
+- `blocks.0.attn.c_q.weight`
+  - natural median / max row scale about `0.00115 / 0.00203`
+  - current max code usage about `19-33`
+
+So the quantizer-floor story is real enough to matter.
+
+But the first naïve fixes were immediately too expensive.
+
+Offline recompression on the current best full artifact showed:
+
+- current quantizer with `lzma`: `14985872` bytes
+- tensor-floor everywhere: `19650520` bytes
+- `mlp.proj` tensor-floor only: `17219364` bytes
+- `mlp.proj` no-floor only: `18391732` bytes
+
+This killed the broad reading:
+
+- removing the fixed floor is not a free gain
+- even a seemingly focused `mlp.proj` exception can blow the full `16,000,000`-byte budget
+
+That led to the actual local test:
+
+- keep the change default-off
+- touch only `.mlp.proj.weight`
+- interpolate the floor between the current `1 / 127` and a tensor-specific floor
+- test only one smoke against the exact local control
+
+Offline budget sweep for that softened family on the best full artifact:
+
+- `alpha=0.05` -> `15059424` bytes
+- `alpha=0.10` -> `15190860`
+- `alpha=0.15` -> `15227864`
+- `alpha=0.20` -> `15304608`
+- `alpha=0.25` -> `15398136`
+- `alpha=0.30` -> `15500392`
+
+So `alpha=0.30` was a safe first smoke from a full-artifact budget perspective.
+
+Exact smoke run:
+
+- `mlx_seq_mlp4x_projfloor_a030_lzma_v1`
+- `soft_floor_alpha = 0.30`
+- pattern: `.mlp.proj.weight`
+
+Result:
+
+- exact smoke control:
+  - `mlx_seq_mlp4x_lzma_cmp_v2`
+  - exact `val_bpb = 2.61172375`
+  - artifact `13522952` bytes
+- tested branch:
+  - `mlx_seq_mlp4x_projfloor_a030_lzma_v1`
+  - exact `val_bpb = 2.61243245`
+  - artifact `13628196` bytes
+
+Decision:
+
+- kill this first soft-floor exception
+- it lost on exact post-roundtrip score by about `+0.00070870`
+- it also increased artifact size by `105244` bytes
+
+Most important update from this iteration:
+
+- quantizer stress alone is not enough to justify an exception
+- "this tensor is underusing the grid" is not the same as "this exception improves the challenge score"
+
+So the next version of the idea must be stricter:
+
+- stop ranking sacred candidates only by quantizer pathology
+- measure actual loss delta for single-tensor or tensor-family roundtrip substitution
+- treat byte cost and semantic sensitivity as separate axes
+
+Current decision rule after this result:
+
+- no more blind soft-floor tuning
+- build a sacredness script that measures:
+  - float baseline loss
+  - loss after replacing exactly one tensor or one coherent tensor family with its roundtripped version
+  - byte share and quantization stress only as supporting diagnostics
+
+This iteration did not produce a new winning family, but it did tighten the search discipline:
+
+- the artifact path is an active source of real structure
+- however, local exceptions still need to earn themselves on exact score, not just on an appealing tensor-atlas story
+
+## Iteration Annotation: Sacredness Measured A Real Tensor, Then Killed The Wrong Refinement
+
+The next step after the failed soft-floor exception was to stop guessing from stress proxies alone.
+
+A new local script:
+
+- `scripts/analyze_tensor_sacredness.py`
+
+measured the actual loss delta from restoring one tensor family or one tensor from float into the quantized-roundtrip baseline.
+
+On a full smoke-val pass, the ranking came back:
+
+- family sacredness:
+  - `mlp.proj.weight` `dBpb ~= +0.000697`
+  - `attn.proj.weight` `dBpb ~= +0.000168`
+  - `tok_emb.weight` `dBpb ~= +0.000062`
+- top single tensors:
+  - `blocks.0.mlp.proj.weight` `dBpb ~= +0.000596`
+  - `blocks.0.attn.proj.weight` `dBpb ~= +0.000121`
+  - `blocks.1.mlp.proj.weight` `dBpb ~= +0.000091`
+
+This gave the first strongly grounded sacred candidate:
+
+- `blocks.0.mlp.proj.weight`
+
+The first exploitation move was the simplest possible preservation path:
+
+- keep exactly `blocks.0.mlp.proj.weight` in fp16 passthrough
+
+Exact smoke result:
+
+- control:
+  - `mlx_seq_mlp4x_lzma_cmp_v2`
+  - exact `val_bpb = 2.61172375`
+- keep-float sacred tensor:
+  - `mlx_seq_mlp4x_keepf_block0proj_v1`
+  - exact `val_bpb = 2.61001513`
+  - artifact `14858772` bytes
+
+So this family produced a real local win:
+
+- score gain about `-0.00170862`
+- still under smoke budget
+
+That was important because it separated:
+
+- a real sacred tensor exploit
+from
+- generic "something in the artifact path is off"
+
+A nearby backup locus was then tested to make sure this was not just random keep-float churn:
+
+- `blocks.0.attn.proj.weight`
+
+Exact smoke result:
+
+- `mlx_seq_mlp4x_keepf_block0attnproj_v1`
+- exact `val_bpb = 2.61456176`
+
+This lost clearly, which narrowed the live family:
+
+- keep-float is not a generic one-tensor win
+- early `mlp.proj` is special in a way early `attn.proj` is not
+
+The next question became:
+
+- can the proven `blocks.0.mlp.proj.weight` exploit be made cheaper without losing the gain?
+
+To answer that, two more local helpers were added:
+
+- `scripts/analyze_tensor_row_sacredness.py`
+- `scripts/estimate_row_subset_passthrough_size.py`
+
+Row analysis showed the important warning:
+
+- the row signal inside `blocks.0.mlp.proj.weight` is diffuse, not concentrated in a tiny subset
+- top-8 rows only captured about `1.8%` of row-relative-error mass
+- top-16 about `3.5%`
+- top-32 about `6.8%`
+- top-64 about `13.3%`
+- top-128 about `26.3%`
+
+So a very small row carveout was already suspect on first principles.
+
+Even so, one disciplined refinement was worth trying because it was cheap:
+
+- top-64 sacred rows of `blocks.0.mlp.proj.weight` kept in fp16 passthrough
+- estimated smoke artifact delta: `+188008` bytes
+
+Exact smoke result:
+
+- `mlx_seq_mlp4x_keepf_block0proj_rows64_v1`
+- exact `val_bpb = 2.62784548`
+- artifact `12755236` bytes
+
+Decision:
+
+- kill the row-subset refinement immediately
+- it lost by about `+0.01612173` versus the smoke control
+- it is not a cheaper version of the full-tensor keep-float win
+- it is a different family, and that family is locally bad
+
+Current read after this chain:
+
+- sacredness measurement was worth doing
+- it found a real exploit
+- the winning unit was the whole tensor, not a sparse row subset
+- naive attempts to cheapen that exploit can destroy the effect entirely
+
+So the live lesson is stricter now:
+
+- "sacred tensor" can be real
+- but the preserved semantics may be distributed across the tensor rather than localized to a small row family
+- byte-cheap refinements still need exact score proof, not just a plausible decomposition story
+
+One more cheapening attempt was still worth trying before closing this branch:
+
+- keep the whole sacred tensor
+- but only soften the quantizer floor on that exact tensor
+- do not widen back out to the full `.mlp.proj.weight` family
+
+This was the cleanest remaining version of the soft-floor idea:
+
+- tensor: `blocks.0.mlp.proj.weight`
+- `alpha = 0.30`
+- estimated smoke artifact delta: `+61272` bytes
+
+Exact smoke result:
+
+- `mlx_seq_mlp4x_projfloor_block0_a030_v1`
+- exact `val_bpb = 2.61193999`
+- artifact `13181736` bytes
+
+Compared to control:
+
+- control exact `2.61172375`
+- miss: about `+0.00021624`
+
+Decision:
+
+- kill tensor-specific soft-floor too
+- it was cheap enough
+- but it still did not beat the control on exact post-roundtrip score
+
+That closes the soft-floor family more firmly:
+
+- broad soft-floor lost
+- tensor-specific soft-floor also lost
+- the surviving exploit remains whole-tensor fp16 preservation of `blocks.0.mlp.proj.weight`
+- the remaining problem is not "find a narrower soft-floor"
+- it is "find a cheaper whole-tensor representation that preserves the same semantics"
+
+Operational note after this branch:
+
+- the live sacred-tensor smoke win
+  - `mlx_seq_mlp4x_keepf_block0proj_v1`
+  - exact `val_bpb = 2.61001513`
+  was archived into `results/` with a normalized report bundle under:
+  - `results/reports/mlx_seq_mlp4x_keepf_block0proj_v1/`
+
+Immediate local limitation:
+
+- a full local promotion of this sacred-tensor exploit could not be run on `2026-03-23`
+- the required full dataset prefix `data/datasets/fineweb10B_sp1024/` is not currently present in this standalone repo
+- so local evidence remains:
+  - smoke win for whole-tensor keep-float
+  - smoke loss for row-subset keep-float
+  - smoke loss for tensor-specific soft-floor
+
+If larger compute becomes available, the work should stop looking like local toy search and become a focused program:
+
+1. Promote the live sacred-tensor exploit on real full data immediately.
+   - run the exact `blocks.0.mlp.proj.weight` fp16-preserve branch on the full validation protocol
+   - verify whether the smoke win survives at scale
+   - measure exact artifact size and whether training adapts around the exception
+
+2. Search cheaper whole-tensor representations, not sparse row approximations.
+   - fp16 whole-tensor keep-float is the current score upper bound
+   - the next real family is a cheaper whole-tensor carrier for that same information
+   - candidates include:
+     - tensor-specific mixed precision
+     - learned sidecar residuals
+     - low-rank + residual only if the actual reconstructed score earns it
+     - tensor-specific packing / staging changes that preserve the whole tensor's semantics
+
+3. Spend compute on robustness, not just novelty.
+   - repeat the live exploit across seeds
+   - test interaction with longer training, different warmup, and larger real validation
+   - stop promoting ideas that only survive one smoke run
+
+4. Only after the sacred exploit is characterized should the search widen again.
+   - if the whole-tensor effect survives promotion, it becomes a new anchor family
+   - if it collapses on full data, then sacred-tensor preservation was only a local smoke artifact

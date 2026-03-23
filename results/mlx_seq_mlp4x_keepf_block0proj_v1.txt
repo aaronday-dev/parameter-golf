@@ -2022,3 +2022,42 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+====================================================================================================
+Running Python 3.11.11 (main, Dec  9 2025, 11:22:44) [Clang 15.0.0 (clang-1500.1.0.2.5)]
+Running MLX 0.31.1
+====================================================================================================
+run_id:mlx_seq_mlp4x_keepf_block0proj_v1
+mlx_version:0.31.1
+train_loader:shards pattern=./data/datasets/fineweb10B_sp1024_smoke/fineweb_train_*.bin
+val_loader:shards pattern=./data/datasets/fineweb10B_sp1024_smoke/fineweb_val_*.bin tokens:1047552
+train_loader:dataset:fineweb10B_sp1024_smoke train_shards:1
+tokenizer_path:./data/tokenizers/fineweb_1024_bpe.model
+model_params:26497096 vocab_size:1024 layers:9 dim:512 heads:8 kv_heads:4 seq_len:1024 tie_embeddings:True
+shared_core:enabled:False unique_blocks:9 schedule:cyclic custom_schedule:- layer_to_block:0,1,2,3,4,5,6,7,8 layer_is_revisit:0,0,0,0,0,0,0,0,0 step_scales:False pass_x0_scales:False revisit_gains:False revisit_count_gains:False revisit_damping:0.000 phase_split_revisit_gain:False revisit_gains_encoder:False revisit_gains_decoder:False role_gains:- correct_block:- correct_gain:0.000 adaptive_correct:False adaptive_correct_block:- adaptive_correct_sources:- adaptive_correct_revisit_only:True adaptive_correct_max_gain:0.000 adaptive_correct_target_amp:1.000 adaptive_correct_log_band:1.000 directional_correct:False directional_correct_block:- directional_correct_sources:- directional_correct_revisit_only:True directional_correct_max_gain:0.000 directional_correct_target_amp:1.000 directional_correct_log_band:1.000 directional_stress_guard:False directional_stress_band:1.000 directional_stress_min_factor:1.000 orbit_gate:False orbit_gate_block:- orbit_gate_steps:1 orbit_gate_revisit_only:True attractor_pulse:False attractor_pulse_block:- attractor_pulse_steps:1 attractor_pulse_gain:0.000 attractor_pulse_trigger_amp:inf attractor_pulse_margin:0.000 attractor_pulse_revisit_only:True mirror_cancel:False mirror_cancel_block:- mirror_cancel_threshold:inf mirror_cancel_revisit_only:True stabilize_every:0 stabilize_after:0 stabilize_gain:0.000
+iterations:80 train_batch_tokens:8192 grad_accum_steps:8 microbatch_tokens:1024 microbatch_batch_size:1 val_max_batch_tokens:524288 verify_quantized_roundtrip:True warmup_steps:0 max_wallclock_seconds:600.000
+mlx_max_microbatch_tokens:8192
+optimizer:muon+adam muon_matrix_params:54 scalar_params:37 embed_lr:0.05 matrix_lr:0.04 scalar_lr:0.04 muon_momentum:0.95 muon_steps:5
+val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path=./data/tokenizers/fineweb_1024_bpe.model
+compute_dtype:mlx.core.bfloat16 compile:True
+dtypes tok_emb:mlx.core.bfloat16 linear_weight:mlx.core.float32 skip_weights:mlx.core.float32
+int8_serialization:compressor:lzma keep_float_max_numel:65536 keep_float_fp32_patterns:attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,step_scale,step_scales,pass_x0_scale,pass_x0_scales,revisit_gain,revisit_gains,revisit_count_gain,revisit_count_gains,revisit_gains_encoder,revisit_gains_decoder keep_float_name_patterns:blocks.0.mlp.proj.weight
+step:1/80 train_loss:6.9428 train_time:301ms step_avg:300.79ms tok_s:27235
+step:2/80 train_loss:18.7191 train_time:1139ms step_avg:569.71ms tok_s:9770
+step:3/80 train_loss:14.1343 train_time:1969ms step_avg:656.23ms tok_s:9882
+step:4/80 train_loss:9.9663 train_time:2824ms step_avg:706.05ms tok_s:9579
+step:5/80 train_loss:7.8307 train_time:3676ms step_avg:735.27ms tok_s:9618
+step:6/80 train_loss:6.8655 train_time:4502ms step_avg:750.41ms tok_s:9919
+step:7/80 train_loss:6.5215 train_time:5288ms step_avg:755.47ms tok_s:10428
+step:8/80 train_loss:6.4775 train_time:5929ms step_avg:741.10ms tok_s:12797
+step:9/80 train_loss:6.3737 train_time:6527ms step_avg:725.26ms tok_s:13691
+step:10/80 train_loss:6.2833 train_time:7102ms step_avg:710.20ms tok_s:14262
+val_progress:1/2
+val_progress:2/2
+step:80/80 val_loss:4.3568 val_bpb:2.6097 train_time:47398ms step_avg:592.48ms
+saved_model:logs/mlx_seq_mlp4x_keepf_block0proj_v1_mlx_model.npz bytes:104960924
+serialized_model_int8_lzma:14858772 bytes (payload:27682080 raw_pickle:27691501 payload_ratio:3.79x)
+val_progress:1/2
+val_progress:2/2
+final_int8_lzma_roundtrip val_loss:4.3572 val_bpb:2.6100 eval_time:13406ms
+final_int8_lzma_roundtrip_exact val_loss:4.35721796 val_bpb:2.61001513

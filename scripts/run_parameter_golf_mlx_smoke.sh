@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PG_DIR="${ROOT_DIR}"
 
 if [[ ! -x "${PG_DIR}/.venv/bin/python" ]]; then
-  echo "Missing ${PG_DIR}/.venv. Create it with 'python3 -m venv .venv' and install requirements.txt." >&2
+  echo "Missing ${PG_DIR}/.venv. Create it with 'python3 -m venv .venv', install requirements.txt, then install mlx." >&2
   exit 1
 fi
 

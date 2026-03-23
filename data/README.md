@@ -14,16 +14,24 @@ Canonical local layout:
 Download the cached FineWeb export for a tokenizer variant with:
 
 ```bash
-python3 data/cached_challenge_fineweb.py --variant sp1024
+.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024
 ```
 
 This populates `./data/datasets/fineweb10B_sp1024/` and `./data/tokenizers/`.
 By default it downloads the full validation split and 8B training tokens (80 train shards).
 
+To also build the local smoke dataset expected by `scripts/run_parameter_golf_mlx_smoke.sh`
+and `scripts/run_parameter_golf_mlx_m4.sh`, add `--build-smoke`. For the smallest local
+smoke setup:
+
+```bash
+.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1 --build-smoke
+```
+
 To fetch more training shards, pass `--train-shards`:
 
 ```bash
-python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 180
+.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 180
 ```
 
 The downloader is manifest-driven and can fetch only a prefix of train shards from a larger published export. With the current shard size of `100_000_000` tokens, `10B` retokenized training tokens is `100` train shards:
@@ -31,12 +39,13 @@ The downloader is manifest-driven and can fetch only a prefix of train shards fr
 ```bash
 MATCHED_FINEWEB_REPO_ID=your-hf-username/your-dataset-repo \
 MATCHED_FINEWEB_REMOTE_ROOT_PREFIX=your_50B_export_root \
-python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 100
+.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 100
 ```
 
 Validation is always downloaded in full from the fixed `fineweb_val_*` split. Training on the first `N` train shards means training on the prefix of the same frozen shuffled export, so the data order stays aligned with the baseline for that tokenizer family.
 
 The default published repo is `willdepueoai/parameter-golf`, with the export rooted under the repo subdirectory `datasets/`.
+Override those defaults with `MATCHED_FINEWEB_REPO_ID` and `MATCHED_FINEWEB_REMOTE_ROOT_PREFIX` if needed.
 
 ## Rebuilding Tokenizers From Published Docs
 

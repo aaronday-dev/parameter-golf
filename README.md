@@ -57,9 +57,16 @@ Create a local environment:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install mlx
 ```
 
-Then place the tokenizer and dataset shards under `./data/` using the layout in:
+Download the smoke tokenizer and dataset prefix used by the local MLX wrappers:
+
+```bash
+.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1 --build-smoke
+```
+
+Then place any larger dataset prefixes under `./data/` using the layout in:
 
 - `data/README.md`
 
@@ -68,6 +75,14 @@ appropriate:
 
 ```bash
 python3 scripts/archive_parameter_golf_run.py RUN_ID
+```
+
+To render a normalized report for a single archived run:
+
+```bash
+python3 scripts/render_parameter_golf_run_report.py \
+  --log results/mlx_full_seq_mlp4x_200_realval_vb524k.txt \
+  --output-dir /tmp/parameter-golf-report
 ```
 
 For Apple Silicon MLX runs:
@@ -101,11 +116,10 @@ RUN_MODE=promotion scripts/run_parameter_golf_mlx_m4.sh
 
 ## Data
 
-Datasets are not vendored here.
+Datasets are not vendored here, but the standalone repo now includes a small
+published-data bootstrap helper for the local MLX path:
 
-This repo assumes the same dataset and tokenizer layout used by the upstream
-OpenAI Parameter Golf codebase. See:
-
+- `data/cached_challenge_fineweb.py`
 - `data/README.md`
 - `docs/upstream-openai-readme.md`
 

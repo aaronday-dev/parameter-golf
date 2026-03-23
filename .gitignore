@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 .python-version
+.claude/
 
 data/datasets/
 data/tokenizers/

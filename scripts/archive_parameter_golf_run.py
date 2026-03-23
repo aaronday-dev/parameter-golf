@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from render_parameter_golf_run_report import build_report, write_report_bundle
+
 
 EXACT_BPB_RE = re.compile(
     r"final_int8_(?:zlib|lzma)_roundtrip_exact val_loss:[0-9.]+ val_bpb:([0-9.]+)"
@@ -94,6 +96,21 @@ def archive_log(run: RunInfo, repo_root: Path, dry_run: bool) -> str:
     return f"archived {run.log_path.name} -> {dest.relative_to(repo_root)}"
 
 
+def render_archived_report(run: RunInfo, repo_root: Path, dry_run: bool) -> str:
+    archived_log_path = repo_root / "results" / run.log_path.name
+    report_dir = repo_root / "results" / "reports" / run.run_id
+    if dry_run:
+        return (
+            f"would render archived report bundle -> {report_dir.relative_to(repo_root)} "
+            f"(artifact_policy=log-only)"
+        )
+    if not archived_log_path.is_file():
+        raise FileNotFoundError(f"Missing archived log for report generation: {archived_log_path}")
+    report = build_report(archived_log_path, artifact_policy="log-only")
+    write_report_bundle(report, report_dir)
+    return f"rendered archived report bundle -> {report_dir.relative_to(repo_root)}"
+
+
 def update_readme(run: RunInfo, repo_root: Path, dry_run: bool) -> str:
     if not run.is_full_eval:
         return "skipped README update (smoke run)"
@@ -166,6 +183,7 @@ def main() -> None:
     run = read_run_info(repo_root, args.run_id)
     actions = [
         archive_log(run, repo_root, args.dry_run),
+        render_archived_report(run, repo_root, args.dry_run),
         update_readme(run, repo_root, args.dry_run),
         update_research_log(run, repo_root, args.dry_run),
     ]

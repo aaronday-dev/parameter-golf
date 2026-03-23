@@ -1441,3 +1441,400 @@ If larger compute becomes available, the work should stop looking like local toy
 4. Only after the sacred exploit is characterized should the search widen again.
    - if the whole-tensor effect survives promotion, it becomes a new anchor family
    - if it collapses on full data, then sacred-tensor preservation was only a local smoke artifact
+
+## Iteration Annotation: The Sacred Tensor Survives Promotion, But Misses The Cap
+
+After the full published dataset prefix was downloaded locally, the whole-tensor sacred exploit was promoted to the real-data MLX protocol:
+
+- `blocks.0.mlp.proj.weight` kept in fp16 passthrough
+- same plain sequential `MLP_MULT=4` control family
+- `200` steps
+- full validation
+- exact `lzma` roundtrip verification
+
+The first promoted run:
+
+- `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v1`
+
+trained through `step:200/200` but the machine crashed at `val_progress:1/119`, before artifact save. This looked like validation-time memory pressure rather than a training failure.
+
+The rerun:
+
+- `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2`
+- reduced `VAL_MAX_BATCH_TOKENS` from `524288` to `131072`
+
+completed successfully.
+
+Result:
+
+- exact `val_bpb = 2.35551193`
+- artifact `16,263,292` bytes via `lzma`
+
+Comparison to the current best capped promoted local result:
+
+- capped control:
+  - `mlx_full_seq_mlp4x_200_realval_vb524k`
+  - exact `val_bpb = 2.35796063`
+  - artifact `14,849,696` bytes
+- sacred-tensor promoted run:
+  - `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2`
+  - exact `val_bpb = 2.35551193`
+  - artifact `16,263,292` bytes
+
+So the most important update is now unambiguous:
+
+- the sacred-tensor effect survives promotion
+- it is not just a smoke artifact
+- it produces a real full-data score gain of about `-0.00244870`
+
+But:
+
+- it misses the decimal `16,000,000`-byte cap by `263,292` bytes
+
+This changes the search problem materially.
+
+Before this run, the open question was:
+
+- does whole-tensor preservation of `blocks.0.mlp.proj.weight` survive full promotion at all?
+
+After this run, the open question is:
+
+- can we recover roughly `263k` bytes without giving back more than `0.00245` bpb?
+
+That is a much tighter and more promising problem.
+
+Current recommendation after this result:
+
+- do not go back to broad architecture wandering
+- treat whole-tensor preservation of `blocks.0.mlp.proj.weight` as a live promoted family
+- focus the next search on budget recovery:
+  - cheaper whole-tensor carrier for that sacred tensor
+  - or a paired low-salience sacrifice elsewhere that buys back about `263k`
+
+## Iteration Annotation: Single Attention-Block Sacrifice Is Too Weak
+
+The first concrete budget-recovery hypothesis after the promoted sacred-tensor result was:
+
+- keep the live sacred tensor exactly:
+  - `blocks.0.mlp.proj.weight` in fp16 passthrough
+- try to buy back the missing `263,292` bytes by making one weak, low-salience attention tensor cheaper at serialization time
+- do this offline, without retraining, on the promoted float artifact:
+  - `logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+
+Why this was a disciplined next move:
+
+- the promoted sacred-tensor branch already proved the family works on score
+- the cap miss was small in absolute terms:
+  - about `1.65%` over the `16,000,000` byte cap
+- non-sacred passthrough bytes were far too small to solve it:
+  - total passthrough in the promoted artifact: `2,179,360` bytes
+  - sacred tensor alone: `2,097,152` bytes
+  - everything else in passthrough combined: only `82,208` bytes
+
+So the first recovery mechanism was:
+
+- leave the sacred tensor untouched
+- pick one quantized attention block
+- apply a harsher tensor-local clip percentile only to that block
+- reserialize with `lzma`
+- exact-eval the reconstructed model on a fixed full-data `128`-sequence validation slice
+
+To make this repeatable, a dedicated offline sweep script was added:
+
+- `scripts/sweep_budget_recovery.py`
+
+The script:
+
+- preserves one named sacred tensor in fp16 passthrough
+- sweeps a candidate tensor family block-by-block
+- tests harsher local clip percentiles
+- records artifact bytes, bytes over cap, and exact `val_bpb`
+
+### First sacrifice family: `attn.c_q.weight`
+
+This was chosen first because earlier sacredness work had consistently ranked `attn.c_q.weight` as one of the least sacred sizable families.
+
+Baseline for the sweep:
+
+- promoted sacred-tensor artifact:
+  - `16,263,292` bytes
+- fixed `128`-sequence full-data eval slice:
+  - baseline keep-float `val_bpb = 2.39749507`
+
+Best result from the `attn.c_q.weight` sweep:
+
+- `blocks.2.attn.c_q.weight` at clip `99.5`
+- artifact `16,201,572` bytes
+- savings vs sacred baseline: `61,720` bytes
+- still over cap by `201,572` bytes
+- `val_bpb = 2.39752396`
+- score delta vs sacred baseline: `+0.00002889`
+
+Other noteworthy `attn.c_q` outcomes:
+
+- most variants saved only a few kilobytes, or even increased artifact size
+- the most aggressive clipping often hurt score without materially improving bytes
+- no single `attn.c_q` block came remotely close to recovering the missing `263k`
+
+Conclusion after the `attn.c_q` sweep:
+
+- one harsher `attn.c_q` block is not enough
+- this family is too weak as a one-block sacrifice
+
+### Second sacrifice family: `attn.proj.weight`
+
+This was the next large, relatively low-salience attention family to test under the same offline sweep.
+
+Best result from the `attn.proj.weight` sweep:
+
+- `blocks.1.attn.proj.weight` at clip `99.5`
+- artifact `16,250,364` bytes
+- savings vs sacred baseline: `12,928` bytes
+- still over cap by `250,364` bytes
+- `val_bpb = 2.39762478`
+- score delta vs sacred baseline: `+0.00012971`
+
+Other `attn.proj` observations:
+
+- savings were generally even smaller than for `attn.c_q`
+- the family was more likely to lose score for negligible byte improvement
+- no single `attn.proj` block was a serious cap-recovery candidate
+
+### What this means
+
+The important discovery is not just that the tested blocks lost.
+
+It is that the tactic itself looks wrong:
+
+- making one weak attention block harsher through local clipping does not buy enough compressed bytes
+- the resulting `lzma` savings are tiny relative to the needed `263,292`
+- even the best single-block `attn.c_q` candidate only bought about `61.7k`
+- the best `attn.proj` candidate only bought about `12.9k`
+
+So the new live read is:
+
+- the sacred tensor itself is real
+- but "recover the budget by making one low-salience attention block cheaper with harsher clipping" is not a viable family
+
+This should now be downranked as a recovery mechanism.
+
+### Updated recommendation
+
+Do not spend more local search on:
+
+- single-block harsher clipping for `attn.c_q.weight`
+- single-block harsher clipping for `attn.proj.weight`
+
+The next budget-recovery family should be qualitatively different:
+
+- a cheaper whole-tensor carrier for `blocks.0.mlp.proj.weight`
+- or a broader, deliberately structured sacrifice that is large enough to matter in bytes
+
+But the evidence now says clearly:
+
+- a one-block attention sacrifice is too small a lever
+
+## Iteration Annotation: Residual Sidecar Wins Under The Cap
+
+After the one-block attention sacrifice family was downranked, the next carrier family tested was:
+
+- keep the whole sacred tensor locus:
+  - `blocks.0.mlp.proj.weight`
+- but replace full fp16 passthrough with:
+  - normal int8 quantization for that tensor
+  - plus a low-rank fp16 residual sidecar
+
+This was implemented as an offline artifact-only family:
+
+- no retraining
+- normal quantized artifact schema preserved
+- one additive sidecar attached to the target tensor during dequantization
+
+Files added / touched for this experiment:
+
+- `train_gpt_mlx.py`
+  - dequantization now accepts an optional tensor-local residual sidecar
+- `scripts/sweep_residual_sidecar.py`
+  - builds and exact-evals residual-sidecar artifacts offline
+
+The important structural check before running the sweep:
+
+- residual tensor:
+  - `R = W_float - dequant(quantize(W_float))`
+  for `blocks.0.mlp.proj.weight`
+- relative residual norm:
+  - about `0.0942`
+
+The residual was not sharply low-rank:
+
+- rank `64` captures about `23.7%` of residual energy
+- rank `128` about `42.6%`
+- rank `192` about `58.2%`
+- rank `224` about `64.8%`
+
+So this family was worth testing, but only as a bounded, empirical sweep rather than a presumed solution.
+
+### Slice sweep on promoted artifact
+
+Using the promoted sacred-tensor float artifact:
+
+- `logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+
+and a fixed `128`-sequence full-data validation slice, the residual sidecar sweep gave:
+
+- keep-float baseline:
+  - artifact `16,263,292`
+  - `val_bpb = 2.39749507`
+- plain quant baseline:
+  - artifact `14,813,572`
+  - `val_bpb = 2.39789063`
+
+Best slice result:
+
+- rank `64`
+- artifact `15,109,864`
+- under cap by `890,136`
+- `val_bpb = 2.39777665`
+
+This was:
+
+- better than plain quant by about `-0.00011398`
+- but still worse than full keep-float by about `+0.00028158`
+
+So the slice result said:
+
+- the family is real
+- but plain low-rank sidecars only recover part of the sacred-tensor gain
+
+### Full exact offline evaluation
+
+Because rank `64` was the best slice candidate and already comfortably under cap, it was promoted to a full exact offline validation pass on the full local validation set.
+
+Result:
+
+- rank `64`
+- artifact `15,109,864`
+- under cap by `890,136`
+- exact `val_bpb = 2.35570158`
+
+Comparison:
+
+- current best capped promoted result:
+  - `mlx_full_seq_mlp4x_200_realval_vb524k`
+  - exact `2.35796063`
+  - artifact `14,849,696`
+- full sacred keep-float promoted result:
+  - `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2`
+  - exact `2.35551193`
+  - artifact `16,263,292`
+- residual sidecar rank `64`:
+  - exact `2.35570158`
+  - artifact `15,109,864`
+
+This means:
+
+- the residual-sidecar family **does** produce a capped promoted result better than the current best capped local run
+- it gives back only about `0.00018965` relative to the over-budget full keep-float sacred result
+- but it stays safely under the `16,000,000` byte cap
+
+This is the most important update from this branch:
+
+- we now have a cheaper whole-tensor carrier that preserves most of the sacred-tensor gain
+- it is not as good as full fp16 keep-float
+- but it is good enough to become the new live capped promoted leader locally
+
+Current read after this result:
+
+- whole-tensor carriers were the right family
+- plain global low-rank is not magical, but it is good enough to matter
+- the problem is no longer "does a cheaper whole-tensor carrier exist?"
+- it is now "can a more structured carrier beat rank-64 residual sidecar under the same cap?"
+
+## Iteration Annotation: Residual Sidecars Fit The Budget, But Not The Gain
+
+The next whole-tensor carrier family after the failed attention-sacrifice sweeps was the most direct linear-algebra baseline:
+
+- keep the normal int8 artifact for all tensors
+- target the one live sacred tensor:
+  - `blocks.0.mlp.proj.weight`
+- compute its quantization residual:
+  - `R = W_float - W_quant_roundtrip`
+- approximate that residual with a low-rank fp16 sidecar
+- reconstruct on load as:
+  - `W_hat = W_q + A @ B`
+
+This was tested offline on the promoted sacred-tensor float artifact using a dedicated sweep script:
+
+- `scripts/sweep_residual_sidecar.py`
+
+The sweep used the same full published dataset prefix, but only a fixed `128`-sequence validation slice for quick ranking.
+
+Baselines on that slice:
+
+- keep-float sacred tensor:
+  - artifact `16,263,292`
+  - `val_bpb = 2.39749507`
+- plain quantized artifact:
+  - artifact `14,813,572`
+  - `val_bpb = 2.39789063`
+
+So on this slice the full sacred keep-float effect is about:
+
+- `-0.00039556 bpb`
+
+The residual-sidecar sweep tested ranks:
+
+- `32, 64, 96, 128, 160, 192, 224`
+
+Important result:
+
+- every tested rank stayed safely under the `16,000,000` byte cap
+- but none of them recovered the full keep-float gain
+
+Best quality result:
+
+- rank `64`
+- artifact `15,109,864`
+- `val_bpb = 2.39777665`
+- delta vs keep-float: `+0.00028158`
+- delta vs plain quantized: `-0.00011398`
+
+Best smallest result:
+
+- rank `32`
+- artifact `14,961,896`
+- `val_bpb = 2.39782656`
+- delta vs keep-float: `+0.00033149`
+- delta vs plain quantized: `-0.00006407`
+
+Largest tested rank:
+
+- rank `224`
+- artifact `15,849,356`
+- still under cap by `150,644`
+- `val_bpb = 2.39794626`
+- worse than plain quantized by `+0.00005563`
+
+The residual itself was not especially compressible in a low-rank sense:
+
+- residual relative norm was about `0.09419`
+- singular-value energy capture was gradual rather than steep
+
+This is the key read:
+
+- the low-rank residual sidecar is a real budget-feasible family
+- but this first SVD carrier does not preserve enough of the sacred tensor's semantics
+- getting under the cap was easy
+- keeping the gain was the hard part
+
+So the update to the search is:
+
+- the problem is no longer "can we find a cheaper whole-tensor carrier at all?"
+- it is "can we find a cheaper whole-tensor carrier that preserves structure better than a plain low-rank residual?"
+
+Current recommendation after this sweep:
+
+- do not promote plain SVD residual sidecars as the answer
+- keep the family alive only in the broader sense of "whole-tensor structured carrier"
+- downrank pure low-rank residuals for this tensor
+- next candidates, if this line continues, should preserve local/block structure rather than only global low-rank structure

@@ -1,0 +1,100 @@
+{
+  "keep_float": {
+    "artifact_bytes": 16263292,
+    "val_bpb": 2.397495073362189,
+    "payload_bytes": 27682080
+  },
+  "plain_quant": {
+    "artifact_bytes": 14813572,
+    "val_bpb": 2.3978906305155037,
+    "payload_bytes": 26634528
+  },
+  "target_tensor": "blocks.0.mlp.proj.weight",
+  "residual_relative_norm": 0.09418993676386687,
+  "rows": [
+    {
+      "rank": 32,
+      "artifact_bytes": 14961896,
+      "artifact_delta_vs_keepf": -1301396,
+      "artifact_delta_vs_plain": 148324,
+      "bytes_over_cap": -1038104,
+      "val_bpb": 2.397826563413304,
+      "bpb_delta_vs_keepf": 0.00033149005111487995,
+      "bpb_delta_vs_plain": -6.406710219986067e-05,
+      "sidecar_raw_bytes": 163840,
+      "payload_bytes": 26798368
+    },
+    {
+      "rank": 64,
+      "artifact_bytes": 15109864,
+      "artifact_delta_vs_keepf": -1153428,
+      "artifact_delta_vs_plain": 296292,
+      "bytes_over_cap": -890136,
+      "val_bpb": 2.397776653996635,
+      "bpb_delta_vs_keepf": 0.00028158063444605475,
+      "bpb_delta_vs_plain": -0.00011397651886868587,
+      "sidecar_raw_bytes": 327680,
+      "payload_bytes": 26962208
+    },
+    {
+      "rank": 96,
+      "artifact_bytes": 15257836,
+      "artifact_delta_vs_keepf": -1005456,
+      "artifact_delta_vs_plain": 444264,
+      "bytes_over_cap": -742164,
+      "val_bpb": 2.397788809585222,
+      "bpb_delta_vs_keepf": 0.00029373622303285885,
+      "bpb_delta_vs_plain": -0.00010182093028188177,
+      "sidecar_raw_bytes": 491520,
+      "payload_bytes": 27126048
+    },
+    {
+      "rank": 128,
+      "artifact_bytes": 15405760,
+      "artifact_delta_vs_keepf": -857532,
+      "artifact_delta_vs_plain": 592188,
+      "bytes_over_cap": -594240,
+      "val_bpb": 2.3979195179142634,
+      "bpb_delta_vs_keepf": 0.0004244445520744655,
+      "bpb_delta_vs_plain": 2.8887398759724903e-05,
+      "sidecar_raw_bytes": 655360,
+      "payload_bytes": 27289888
+    },
+    {
+      "rank": 160,
+      "artifact_bytes": 15553684,
+      "artifact_delta_vs_keepf": -709608,
+      "artifact_delta_vs_plain": 740112,
+      "bytes_over_cap": -446316,
+      "val_bpb": 2.3979199469350374,
+      "bpb_delta_vs_keepf": 0.00042487357284848315,
+      "bpb_delta_vs_plain": 2.9316419533742533e-05,
+      "sidecar_raw_bytes": 819200,
+      "payload_bytes": 27453728
+    },
+    {
+      "rank": 192,
+      "artifact_bytes": 15701496,
+      "artifact_delta_vs_keepf": -561796,
+      "artifact_delta_vs_plain": 887924,
+      "bytes_over_cap": -298504,
+      "val_bpb": 2.3978743277261048,
+      "bpb_delta_vs_keepf": 0.00037925436391583744,
+      "bpb_delta_vs_plain": -1.6302789398903172e-05,
+      "sidecar_raw_bytes": 983040,
+      "payload_bytes": 27617568
+    },
+    {
+      "rank": 224,
+      "artifact_bytes": 15849356,
+      "artifact_delta_vs_keepf": -413936,
+      "artifact_delta_vs_plain": 1035784,
+      "bytes_over_cap": -150644,
+      "val_bpb": 2.397946260209155,
+      "bpb_delta_vs_keepf": 0.00045118684696587863,
+      "bpb_delta_vs_plain": 5.562969365113801e-05,
+      "sidecar_raw_bytes": 1146880,
+      "payload_bytes": 27781408
+    }
+  ]
+}

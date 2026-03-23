@@ -1456,6 +1456,8 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
     out: dict[str, mx.array] = {}
     qmeta = quant_obj.get("qmeta", {})
     passthrough_orig_dtypes = quant_obj.get("passthrough_orig_dtypes", {})
+    sidecars = quant_obj.get("sidecars", {})
+    used_sidecars: set[str] = set()
     for name, q in quant_obj["quantized"].items():
         q_np = np.asarray(q, dtype=np.int8)
         dtype_name = quant_obj["dtypes"][name]
@@ -1465,6 +1467,18 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
             out_arr = q_np.astype(np.float32) * scale.reshape((q_np.shape[0],) + (1,) * (q_np.ndim - 1))
         else:
             out_arr = q_np.astype(np.float32) * float(scale)
+        sidecar = sidecars.get(name)
+        if isinstance(sidecar, dict) and sidecar.get("scheme") == "residual_low_rank_v1":
+            left = np.asarray(sidecar["left"], dtype=np.float32)
+            right = np.asarray(sidecar["right"], dtype=np.float32)
+            if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[0]:
+                raise ValueError(f"Invalid residual sidecar shapes for {name}: left={left.shape} right={right.shape}")
+            if out_arr.ndim != 2 or left.shape[0] != out_arr.shape[0] or right.shape[1] != out_arr.shape[1]:
+                raise ValueError(
+                    f"Residual sidecar shape mismatch for {name}: tensor={out_arr.shape} left={left.shape} right={right.shape}"
+                )
+            out_arr = out_arr + (left @ right)
+            used_sidecars.add(name)
         out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[dtype_name])
     for name, arr in quant_obj["passthrough"].items():
         # Restore small tensors, undoing the temporary fp16 storage cast if needed.
@@ -1474,6 +1488,9 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
             out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[orig_dtype])
         else:
             out[name] = mx.array(out_arr)
+    unused_sidecars = sorted(name for name in sidecars.keys() if name not in used_sidecars)
+    if unused_sidecars:
+        raise ValueError(f"Unused residual sidecars for tensors: {', '.join(unused_sidecars)}")
     return out
 
 

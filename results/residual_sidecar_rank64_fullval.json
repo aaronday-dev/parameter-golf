@@ -1,0 +1,24 @@
+{
+  "keep_float": null,
+  "plain_quant": {
+    "artifact_bytes": 14813572,
+    "val_bpb": null,
+    "payload_bytes": 26634528
+  },
+  "target_tensor": "blocks.0.mlp.proj.weight",
+  "residual_relative_norm": 0.09418993676386687,
+  "rows": [
+    {
+      "rank": 64,
+      "artifact_bytes": 15109864,
+      "artifact_delta_vs_keepf": null,
+      "artifact_delta_vs_plain": 296292,
+      "bytes_over_cap": -890136,
+      "val_bpb": 2.3557015772305148,
+      "bpb_delta_vs_keepf": null,
+      "bpb_delta_vs_plain": null,
+      "sidecar_raw_bytes": 327680,
+      "payload_bytes": 26962208
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "float_artifact": "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz",
+  "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+  "compare_capped_bpb": 2.35570158,
+  "compare_capped_artifact_bytes": 15109864,
+  "baseline_8bit": {
+    "artifact_bytes": 14813668,
+    "val_bpb": 2.355862958237435,
+    "payload_bytes": 26634528
+  },
+  "mixed_profile": {
+    "artifact_bytes": 7244516,
+    "val_bpb": 2.386233089440687,
+    "payload_bytes": 17787168,
+    "artifact_delta_vs_8bit": -7569152,
+    "bpb_delta_vs_8bit": 0.03037013120325227,
+    "artifact_delta_vs_capped_leader": -7865348,
+    "bpb_delta_vs_capped_leader": 0.030531509440687277
+  }
+}

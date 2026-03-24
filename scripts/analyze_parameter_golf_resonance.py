@@ -115,6 +115,9 @@ def load_model(module, model_path: Path, metadata: dict[str, object]):
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
+        bigram_hash_on=bool(metadata.get("bigram_hash_on", False)),
+        bigram_hash_bins=int(metadata.get("bigram_hash_bins", 4096)),
+        bigram_hash_init=float(metadata.get("bigram_hash_init", 0.0)),
         qk_gain_init=args.qk_gain_init,
     )
     model.update(module.tree_unflatten(list(flat_state.items())))

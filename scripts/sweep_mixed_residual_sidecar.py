@@ -231,6 +231,7 @@ def main() -> None:
     if ns.target_tensor not in float_flat:
         raise ValueError(f"missing target tensor {ns.target_tensor!r}")
     compiled_loss = pg.mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_token_losses = pg.mx.compile(lambda x, y: model.token_losses(x, y), inputs=model.state, outputs=model.state)
 
     keepf_artifact_bytes: int | None = None
     keepf_bpb: float | None = None
@@ -242,6 +243,7 @@ def main() -> None:
         _, keepf_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             keepf_flat,
             args,
             val_tokens,
@@ -261,6 +263,7 @@ def main() -> None:
         _, plain_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             plain_flat,
             args,
             val_tokens,
@@ -303,6 +306,7 @@ def main() -> None:
         _, global_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             global_flat,
             args,
             val_tokens,
@@ -356,6 +360,7 @@ def main() -> None:
                 _, val_bpb = evaluate_state(
                     model,
                     compiled_loss,
+                    compiled_token_losses,
                     quant_flat,
                     args,
                     val_tokens,

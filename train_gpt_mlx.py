@@ -11,6 +11,7 @@ import json
 import lzma
 import math
 import os
+import fnmatch
 import pickle
 import sys
 import time
@@ -158,6 +159,11 @@ class Hyperparameters:
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     verify_quantized_roundtrip: bool = bool(int(os.environ.get("VERIFY_QUANTIZED_ROUNDTRIP", "1")))
+    eval_mode: str = os.environ.get("EVAL_MODE", "contiguous").strip().lower()
+    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 64))
+    bigram_hash_on: bool = bool(int(os.environ.get("BIGRAM_HASH_ON", "0")))
+    bigram_hash_bins: int = int(os.environ.get("BIGRAM_HASH_BINS", 4096))
+    bigram_hash_init: float = float(os.environ.get("BIGRAM_HASH_INIT", 0.0))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
@@ -485,6 +491,7 @@ class GPT(nn.Module):
                  dim: int, num_heads: int,
                  num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
+                 bigram_hash_on: bool, bigram_hash_bins: int, bigram_hash_init: float,
                  qk_gain_init: float):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -506,6 +513,9 @@ class GPT(nn.Module):
             raise ValueError("choose at most one revisit-gain mode: base, phase-split, or count-indexed")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
+        self.bigram_hash_on = bool(bigram_hash_on)
+        self.bigram_hash_bins = max(int(bigram_hash_bins), 1)
+        self.bigram_hash_init = float(bigram_hash_init)
         self.num_layers = num_layers
         self.num_unique_blocks = shared_core_blocks
         self.shared_core_enabled = self.num_unique_blocks < self.num_layers
@@ -733,6 +743,11 @@ class GPT(nn.Module):
         self.shared_core_stabilize_gain = stabilize_gain if self.shared_core_stabilize_every > 0 else 0.0
 
         self.tok_emb = nn.Embedding(vocab_size, dim)
+        self.bigram_hash_emb = (
+            mx.random.normal((self.bigram_hash_bins, dim), dtype=mx.float32) * self.bigram_hash_init
+        ).astype(COMPUTE_DTYPE) if self.bigram_hash_on and self.bigram_hash_init > 0.0 else (
+            mx.zeros((self.bigram_hash_bins, dim), dtype=COMPUTE_DTYPE) if self.bigram_hash_on else None
+        )
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
@@ -775,6 +790,26 @@ class GPT(nn.Module):
     def softcap(self, logits: mx.array) -> mx.array:
         c = self.logit_softcap
         return c * mx.tanh(logits / c)
+
+    def bigram_hash_ids(self, input_ids: mx.array) -> mx.array | None:
+        if not self.bigram_hash_on or self.bigram_hash_emb is None:
+            return None
+        prev_ids = mx.concatenate(
+            [
+                mx.zeros((input_ids.shape[0], 1), dtype=mx.int32),
+                input_ids[:, :-1].astype(mx.int32),
+            ],
+            axis=1,
+        )
+        curr_ids = input_ids.astype(mx.int32)
+        hash_ids = ((prev_ids * 1315423911) ^ curr_ids) % self.bigram_hash_bins
+        return mx.concatenate(
+            [
+                mx.zeros((input_ids.shape[0], 1), dtype=mx.int32),
+                hash_ids[:, 1:].astype(mx.int32),
+            ],
+            axis=1,
+        )
 
     def apply_block(self, layer_idx: int, x: mx.array, x0: mx.array) -> mx.array:
         x0_block = x0 if self.pass_x0_scales is None else self.pass_x0_scales[layer_idx].astype(x.dtype) * x0
@@ -1156,7 +1191,11 @@ class GPT(nn.Module):
         return x, anchor, anchor_count, gate_metrics
 
     def __call__(self, input_ids: mx.array) -> mx.array:
-        x = rms_norm(self.tok_emb(input_ids).astype(COMPUTE_DTYPE))
+        x = self.tok_emb(input_ids).astype(COMPUTE_DTYPE)
+        bigram_hash_ids = self.bigram_hash_ids(input_ids)
+        if bigram_hash_ids is not None:
+            x = x + self.bigram_hash_emb[bigram_hash_ids].astype(x.dtype)
+        x = rms_norm(x)
         x0 = x
         anchor = x
         anchor_count = 1
@@ -1205,24 +1244,26 @@ class GPT(nn.Module):
             )
         return self.final_norm(x)
 
-    def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
-        # Cross-entropy over flattened tokens. We keep optional logit chunking because it is a useful
-        # memory knob on Macs, but the common path is chunk_tokens=0 (single matmul + CE).
+    def token_losses(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
         y = target_ids.reshape(-1)
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
             logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
-            return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
+            losses = nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="none")
+            return losses.reshape(target_ids.shape)
 
-        loss_sum = mx.array(0.0, dtype=mx.float32)
+        parts: list[mx.array] = []
         n = int(x.shape[0])
         for s in range(0, n, self.logit_chunk_tokens):
             e = min(s + self.logit_chunk_tokens, n)
             logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
-            loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
-        return loss_sum / float(n)
+            parts.append(nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="none"))
+        return mx.concatenate(parts, axis=0).reshape(target_ids.shape)
+
+    def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        return mx.mean(self.token_losses(input_ids, target_ids))
 
 # ==============================================================================
 # OPTIMIZERS (MUON + ADAM SPLIT)
@@ -1345,6 +1386,56 @@ INT8_KEEP_FLOAT_NAME_PATTERNS = tuple(
     for pattern in os.environ.get("INT8_KEEP_FLOAT_NAME_PATTERNS", "").split(",")
     if pattern
 )
+INTX_BITS_BY_NAME = tuple(
+    (pattern.strip(), int(bits_text))
+    for item in os.environ.get("INTX_BITS_BY_NAME", "").split(",")
+    if item.strip()
+    for pattern, bits_text in [item.split(":", 1)]
+)
+
+
+def name_matches_pattern(name: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(name, pattern) if any(ch in pattern for ch in "*?[]") else pattern in name
+
+
+def quant_bits_for_name(name: str, overrides: tuple[tuple[str, int], ...] | None = None) -> int:
+    rules = INTX_BITS_BY_NAME if overrides is None else overrides
+    for pattern, bits in rules:
+        if name_matches_pattern(name, pattern):
+            if bits < 2 or bits > 8:
+                raise ValueError(f"quant bits must be in [2, 8], got {bits} for pattern {pattern!r}")
+            return bits
+    return 8
+
+
+def _pack_signed_codes(q: np.ndarray, bits: int) -> np.ndarray:
+    if bits == 8:
+        return np.ascontiguousarray(q.astype(np.int8, copy=False))
+    qmax = (1 << (bits - 1)) - 1
+    flat = np.asarray(q, dtype=np.int16).reshape(-1)
+    unsigned = np.asarray(flat + qmax, dtype=np.uint32)
+    offsets = np.arange(unsigned.size, dtype=np.uint64) * bits
+    total_bytes = (unsigned.size * bits + 7) // 8
+    packed = np.zeros((total_bytes,), dtype=np.uint8)
+    for shift in range(bits):
+        bit_values = ((unsigned >> shift) & 1).astype(np.uint8)
+        np.add.at(packed, (offsets + shift) // 8, bit_values << ((offsets + shift) % 8))
+    return np.ascontiguousarray(packed)
+
+
+def _unpack_signed_codes(packed: np.ndarray, shape: tuple[int, ...], bits: int) -> np.ndarray:
+    if bits == 8:
+        return np.ascontiguousarray(np.asarray(packed, dtype=np.int8).reshape(shape))
+    qmax = (1 << (bits - 1)) - 1
+    count = int(np.prod(shape))
+    offsets = np.arange(count, dtype=np.uint64) * bits
+    packed_u8 = np.asarray(packed, dtype=np.uint8).reshape(-1)
+    values = np.zeros((count,), dtype=np.uint32)
+    for shift in range(bits):
+        bit_values = ((packed_u8[(offsets + shift) // 8] >> ((offsets + shift) % 8)) & 1).astype(np.uint32)
+        values |= bit_values << shift
+    signed = values.astype(np.int16) - qmax
+    return np.ascontiguousarray(signed.astype(np.int8, copy=False).reshape(shape))
 
 
 def compress_quant_blob(raw: bytes) -> tuple[str, bytes]:
@@ -1377,25 +1468,29 @@ def keep_float_array(name: str, arr: mx.array, passthrough_orig_dtypes: dict[str
     return np.ascontiguousarray(np.array(arr, copy=True))
 
 
-def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
+def quantize_float_array(arr: mx.array, num_bits: int = 8) -> tuple[np.ndarray, np.ndarray]:
     f32 = _np_float32(arr)
+    qmax = float((1 << (num_bits - 1)) - 1)
     if f32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
         # ranges much better than a single tensor-wide scale.
         clip_abs = np.quantile(np.abs(f32), INT8_CLIP_Q, axis=1) if f32.size else np.empty((f32.shape[0],), dtype=np.float32)
         clipped = np.clip(f32, -clip_abs[:, None], clip_abs[:, None])
-        scale = np.maximum(clip_abs / 127.0, 1.0 / 127.0).astype(np.float32, copy=False)
-        q = np.clip(np.round(clipped / scale[:, None]), -127, 127).astype(np.int8, copy=False)
+        scale = np.maximum(clip_abs / qmax, 1.0 / qmax).astype(np.float32, copy=False)
+        q = np.clip(np.round(clipped / scale[:, None]), -qmax, qmax).astype(np.int8, copy=False)
         return np.ascontiguousarray(q), np.ascontiguousarray(scale.astype(INT8_PER_ROW_SCALE_DTYPE, copy=False))
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(np.quantile(np.abs(f32).reshape(-1), INT8_CLIP_Q)) if f32.size else 0.0
-    scale = np.array(clip_abs / 127.0 if clip_abs > 0.0 else 1.0, dtype=np.float32)
-    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
+    scale = np.array(clip_abs / qmax if clip_abs > 0.0 else 1.0, dtype=np.float32)
+    q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -qmax, qmax).astype(np.int8, copy=False)
     return np.ascontiguousarray(q), scale
 
 
-def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str, object], dict[str, int]]:
+def quantize_state_dict_int8(
+    flat_state: dict[str, mx.array],
+    quant_bits_overrides: tuple[tuple[str, int], ...] | None = None,
+) -> tuple[dict[str, object], dict[str, int]]:
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
     dtypes: dict[str, str] = {}
@@ -1431,13 +1526,20 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_array(arr)
-        if s.ndim > 0:
-            qmeta[name] = {"scheme": "per_row", "axis": 0}
-        quantized[name] = q
+        num_bits = quant_bits_for_name(name, overrides=quant_bits_overrides)
+        q, s = quantize_float_array(arr, num_bits=num_bits)
+        packed = _pack_signed_codes(q, num_bits)
+        qmeta[name] = {
+            "scheme": "per_row" if s.ndim > 0 else "per_tensor",
+            "axis": 0 if s.ndim > 0 else None,
+            "bits": num_bits,
+            "shape": tuple(int(dim) for dim in q.shape),
+            "packed": num_bits < 8,
+        }
+        quantized[name] = packed
         scales[name] = s
         dtypes[name] = str(arr.dtype).split(".")[-1]
-        stats["int8_payload_bytes"] += int(q.nbytes + s.nbytes)
+        stats["int8_payload_bytes"] += int(packed.nbytes + s.nbytes)
     obj: dict[str, object] = {
         "__quant_format__": "int8_clean_per_row_v1",
         "quantized": quantized,
@@ -1501,10 +1603,13 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
     sidecars = quant_obj.get("sidecars", {})
     used_sidecars: set[str] = set()
     for name, q in quant_obj["quantized"].items():
-        q_np = np.asarray(q, dtype=np.int8)
+        meta = qmeta.get(name, {})
+        num_bits = int(meta.get("bits", 8))
+        q_shape = tuple(int(dim) for dim in meta.get("shape", np.asarray(q).shape))
+        q_np = _unpack_signed_codes(np.asarray(q), q_shape, num_bits)
         dtype_name = quant_obj["dtypes"][name]
         scale = np.asarray(quant_obj["scales"][name], dtype=np.float32)
-        if qmeta.get(name, {}).get("scheme") == "per_row" or scale.ndim > 0:
+        if meta.get("scheme") == "per_row" or scale.ndim > 0:
             # Broadcast the saved row scale back across trailing dimensions.
             out_arr = q_np.astype(np.float32) * scale.reshape((q_np.shape[0],) + (1,) * (q_np.ndim - 1))
         else:
@@ -1612,6 +1717,34 @@ def load_validation_tokens(pattern: str, seq_len: int) -> np.ndarray:
     return tokens[: usable + 1]
 
 
+def build_sliding_eval_windows(total_target_tokens: int, seq_len: int, stride: int) -> list[tuple[int, int, int]]:
+    if stride <= 0:
+        raise ValueError(f"EVAL_STRIDE must be positive, got {stride}")
+    if total_target_tokens <= 0:
+        return []
+    if total_target_tokens <= seq_len:
+        return [(0, 0, total_target_tokens)]
+    starts = list(range(0, total_target_tokens - seq_len + 1, stride))
+    last_start = total_target_tokens - seq_len
+    if starts[-1] != last_start:
+        starts.append(last_start)
+    windows: list[tuple[int, int, int]] = []
+    next_unscored = 0
+    for start in starts:
+        window_end = min(start + seq_len, total_target_tokens)
+        score_start = max(next_unscored, start)
+        if score_start >= window_end:
+            continue
+        windows.append((start, score_start - start, window_end - start))
+        next_unscored = window_end
+    if next_unscored != total_target_tokens:
+        raise ValueError(
+            f"Sliding eval coverage mismatch: covered {next_unscored} of {total_target_tokens} tokens "
+            f"(seq_len={seq_len}, stride={stride})"
+        )
+    return windows
+
+
 def loss_and_grad_chunked(
     args: Hyperparameters,
     train_loader: TokenLoader,
@@ -1640,51 +1773,88 @@ def eval_val(
     base_bytes_lut: np.ndarray,
     has_leading_space_lut: np.ndarray,
     is_boundary_token_lut: np.ndarray,
+    compiled_token_losses=None,
     log_fn: Callable[[str], None] | None = None,
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    eval_mode = args.eval_mode
+    if eval_mode not in {"contiguous", "sliding"}:
+        raise ValueError(f"EVAL_MODE must be 'contiguous' or 'sliding', got {eval_mode!r}")
     val_batch_tokens = effective_val_batch_tokens(args)
     val_batch_seqs = val_batch_tokens // args.train_seq_len
-    total_seqs = (val_tokens.size - 1) // args.train_seq_len
-    total_batches = max((total_seqs + val_batch_seqs - 1) // val_batch_seqs, 1)
     total_loss_sum = 0.0
     total_tokens = 0.0
     total_bytes = 0.0
     batch_losses: list[mx.array] = []
     batch_token_counts: list[float] = []
-    for batch_idx, batch_seq_start in enumerate(range(0, total_seqs, val_batch_seqs), start=1):
-        batch_seq_end = min(batch_seq_start + val_batch_seqs, total_seqs)
-        raw_start = batch_seq_start * args.train_seq_len
-        raw_end = batch_seq_end * args.train_seq_len + 1
-        chunk = val_tokens[raw_start:raw_end]
-        x_np = chunk[:-1].reshape(-1, args.train_seq_len)
-        y_np = chunk[1:].reshape(-1, args.train_seq_len)
-        x = mx.array(x_np, dtype=mx.int32)
-        y = mx.array(y_np, dtype=mx.int32)
-        chunk_token_count = float(y.size)
-        batch_loss = compiled_loss(x, y).astype(mx.float32)
-        batch_losses.append(batch_loss)
-        batch_token_counts.append(chunk_token_count)
-        prev_ids = x_np.reshape(-1)
-        tgt_ids = y_np.reshape(-1)
-        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-        bytes_np += (
-            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
-        ).astype(np.int16, copy=False)
-        total_tokens += chunk_token_count
-        total_bytes += float(bytes_np.astype(np.float64).sum())
-        if len(batch_losses) >= 16 or batch_idx == total_batches:
-            mx.eval(*batch_losses)
-            for loss_value, token_count in zip(batch_losses, batch_token_counts):
-                total_loss_sum += float(loss_value.item()) * token_count
-            batch_losses.clear()
-            batch_token_counts.clear()
-        if log_fn is not None and total_batches > 1 and (
-            batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
-        ):
-            log_fn(f"val_progress:{batch_idx}/{total_batches}")
+    if eval_mode == "contiguous":
+        total_seqs = (val_tokens.size - 1) // args.train_seq_len
+        total_batches = max((total_seqs + val_batch_seqs - 1) // val_batch_seqs, 1)
+        for batch_idx, batch_seq_start in enumerate(range(0, total_seqs, val_batch_seqs), start=1):
+            batch_seq_end = min(batch_seq_start + val_batch_seqs, total_seqs)
+            raw_start = batch_seq_start * args.train_seq_len
+            raw_end = batch_seq_end * args.train_seq_len + 1
+            chunk = val_tokens[raw_start:raw_end]
+            x_np = chunk[:-1].reshape(-1, args.train_seq_len)
+            y_np = chunk[1:].reshape(-1, args.train_seq_len)
+            x = mx.array(x_np, dtype=mx.int32)
+            y = mx.array(y_np, dtype=mx.int32)
+            chunk_token_count = float(y.size)
+            batch_loss = compiled_loss(x, y).astype(mx.float32)
+            batch_losses.append(batch_loss)
+            batch_token_counts.append(chunk_token_count)
+            prev_ids = x_np.reshape(-1)
+            tgt_ids = y_np.reshape(-1)
+            bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+            bytes_np += (
+                has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+            ).astype(np.int16, copy=False)
+            total_tokens += chunk_token_count
+            total_bytes += float(bytes_np.astype(np.float64).sum())
+            if len(batch_losses) >= 16 or batch_idx == total_batches:
+                mx.eval(*batch_losses)
+                for loss_value, token_count in zip(batch_losses, batch_token_counts):
+                    total_loss_sum += float(loss_value.item()) * token_count
+                batch_losses.clear()
+                batch_token_counts.clear()
+            if log_fn is not None and total_batches > 1 and (
+                batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
+            ):
+                log_fn(f"val_progress:{batch_idx}/{total_batches}")
+    else:
+        if compiled_token_losses is None:
+            raise ValueError("Sliding eval requires compiled_token_losses")
+        windows = build_sliding_eval_windows(val_tokens.size - 1, args.train_seq_len, args.eval_stride)
+        total_batches = max((len(windows) + val_batch_seqs - 1) // val_batch_seqs, 1)
+        positions = np.arange(args.train_seq_len, dtype=np.int32)[None, :]
+        for batch_idx, batch_start in enumerate(range(0, len(windows), val_batch_seqs), start=1):
+            batch_windows = windows[batch_start : batch_start + val_batch_seqs]
+            x_np = np.stack([val_tokens[start : start + args.train_seq_len] for start, _, _ in batch_windows], axis=0)
+            y_np = np.stack([val_tokens[start + 1 : start + args.train_seq_len + 1] for start, _, _ in batch_windows], axis=0)
+            score_starts = np.asarray([score_start for _, score_start, _ in batch_windows], dtype=np.int32)
+            score_ends = np.asarray([score_end for _, _, score_end in batch_windows], dtype=np.int32)
+            score_mask = (positions >= score_starts[:, None]) & (positions < score_ends[:, None])
+            x = mx.array(x_np, dtype=mx.int32)
+            y = mx.array(y_np, dtype=mx.int32)
+            token_losses = compiled_token_losses(x, y).astype(mx.float32)
+            mx.eval(token_losses)
+            loss_np = np.asarray(token_losses, dtype=np.float32)
+            chunk_token_count = float(score_mask.astype(np.int64).sum())
+            total_loss_sum += float(loss_np[score_mask].astype(np.float64).sum())
+            prev_ids = x_np
+            tgt_ids = y_np
+            bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+            bytes_np += (
+                has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+            ).astype(np.int16, copy=False)
+            total_tokens += chunk_token_count
+            total_bytes += float(bytes_np[score_mask].astype(np.float64).sum())
+            if log_fn is not None and total_batches > 1 and (
+                batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
+            ):
+                log_fn(f"val_progress:{batch_idx}/{total_batches}")
     val_loss = total_loss_sum / total_tokens
     bits_per_token = val_loss / math.log(2.0)
     val_bpb = bits_per_token * (total_tokens / total_bytes)
@@ -1812,6 +1982,9 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
+        bigram_hash_on=args.bigram_hash_on,
+        bigram_hash_bins=args.bigram_hash_bins,
+        bigram_hash_init=args.bigram_hash_init,
         qk_gain_init=args.qk_gain_init,
     )
     opt = SplitOptimizers(model, args)
@@ -1824,6 +1997,7 @@ def main() -> None:
     # Compiling the model-bound functions and capturing the full model state fixes that while still
     # returning gradients only for trainable parameters via nn.value_and_grad(...).
     compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_token_losses = mx.compile(lambda x, y: model.token_losses(x, y), inputs=model.state, outputs=model.state)
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
         inputs=model.state,
@@ -1912,6 +2086,7 @@ def main() -> None:
         f"iterations:{args.iterations} train_batch_tokens:{args.train_batch_tokens} grad_accum_steps:{args.grad_accum_steps} "
         f"microbatch_tokens:{args.microbatch_tokens} microbatch_batch_size:{args.microbatch_tokens // args.train_seq_len} "
         f"val_max_batch_tokens:{args.val_max_batch_tokens} "
+        f"eval_mode:{args.eval_mode} eval_stride:{args.eval_stride} "
         f"verify_quantized_roundtrip:{args.verify_quantized_roundtrip} "
         f"warmup_steps:{args.warmup_steps} max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
@@ -1926,13 +2101,19 @@ def main() -> None:
     log(f"compute_dtype:{COMPUTE_DTYPE} compile:True")
     log(
         f"dtypes tok_emb:{model.tok_emb.weight.dtype} "
+        f"bigram_hash:{model.bigram_hash_emb.dtype if model.bigram_hash_emb is not None else '-'} "
         f"linear_weight:{model.blocks[0].attn.c_q.weight.dtype} "
         f"skip_weights:{model.skip_weights.dtype}"
     )
     log(
+        f"bigram_hash:on:{model.bigram_hash_on} bins:{model.bigram_hash_bins if model.bigram_hash_on else 0} "
+        f"init:{model.bigram_hash_init:.6f}"
+    )
+    log(
         f"int8_serialization:compressor:{INT8_COMPRESSOR} keep_float_max_numel:{INT8_KEEP_FLOAT_MAX_NUMEL} "
         f"keep_float_fp32_patterns:{','.join(INT8_KEEP_FLOAT_FP32_NAME_PATTERNS) if INT8_KEEP_FLOAT_FP32_NAME_PATTERNS else '-'} "
-        f"keep_float_name_patterns:{','.join(INT8_KEEP_FLOAT_NAME_PATTERNS) if INT8_KEEP_FLOAT_NAME_PATTERNS else '-'}"
+        f"keep_float_name_patterns:{','.join(INT8_KEEP_FLOAT_NAME_PATTERNS) if INT8_KEEP_FLOAT_NAME_PATTERNS else '-'} "
+        f"quant_bits_by_name:{','.join(f'{pattern}:{bits}' for pattern, bits in INTX_BITS_BY_NAME) if INTX_BITS_BY_NAME else '-'}"
     )
 
     # ==============================================================================
@@ -1986,6 +2167,7 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
+                compiled_token_losses=compiled_token_losses,
                 log_fn=log,
             )
             if step % 25 == 0 or last_step:
@@ -2074,6 +2256,7 @@ def main() -> None:
             base_bytes_lut,
             has_leading_space_lut,
             is_boundary_token_lut,
+            compiled_token_losses=compiled_token_losses,
             log_fn=log,
         )
         q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)

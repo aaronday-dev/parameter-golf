@@ -180,6 +180,9 @@ def build_model(args: pg.Hyperparameters) -> pg.GPT:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
+        bigram_hash_on=args.bigram_hash_on,
+        bigram_hash_bins=args.bigram_hash_bins,
+        bigram_hash_init=args.bigram_hash_init,
         qk_gain_init=args.qk_gain_init,
     )
 

@@ -1969,3 +1969,103 @@ Updated recommendation:
 - downrank this first mixed-global-local variant
 - if this line continues, the next structured carrier should not be "global low-rank plus uniform column tiles"
 - any future local correction should have a fresher reason than this simple leftover-residual tiling
+
+## 2026-03-24 - public-parity gap work: sliding eval, bigram hash, and mixed-bit headroom
+
+The public records are stacking several gain classes that this repo mostly did not have yet:
+
+- sliding-window eval
+- cheap token-local bias
+- lower-bit mixed precision
+
+The first pass on those classes produced a clearer frontier, not a new winner yet.
+
+### 1. Sliding eval is now implemented as a separate parity track
+
+Both trainers now support:
+
+- `EVAL_MODE=contiguous|sliding`
+- `EVAL_STRIDE=<int>`
+
+The sliding implementation scores:
+
+- the full first window
+- only the newly exposed suffix on later overlapping windows
+
+This avoids double-counting tokens while giving a public-parity metric path.
+
+Local validation checks:
+
+- contiguous vs sliding with `EVAL_STRIDE=TRAIN_SEQ_LEN` matched to numerical noise
+- on the capped rank-64 residual-sidecar winner, a `1024`-sequence slice showed:
+  - contiguous `val_bpb = 2.37974998`
+  - sliding-64 `val_bpb = 2.37880930`
+  - improvement:
+    - `-0.00094068`
+
+So sliding eval is real and worth keeping, but as a separate parity track rather than a rewrite of old local history.
+
+### 2. Cheap token-local bigram hash did not earn itself
+
+The first public-style cheap token-local bias tested here was:
+
+- zero-init hashed bigram embedding
+- added before the first RMSNorm
+- `BIGRAM_HASH_BINS=4096`
+
+Exact smoke result:
+
+- run:
+  - `mlx_seq_mlp4x_bigram_hash_v1`
+- artifact:
+  - `13,448,860` bytes
+- exact `val_bpb = 2.61192726`
+- smoke control:
+  - `2.61172375`
+- delta:
+  - `+0.00020351`
+
+That is a clean kill for this first bigram-hash implementation.
+
+### 3. Lower-bit mixed precision creates very large byte headroom, but loses badly on the current model
+
+An offline mixed-bit export sweep was run on the promoted sacred-tensor float artifact:
+
+- source float artifact:
+  - `logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+- tested profile:
+  - `*.mlp.fc.weight:5`
+  - `*.mlp.proj.weight:5`
+  - `*.attn.c_q.weight:6`
+  - `*.attn.c_k.weight:6`
+  - `*.attn.c_v.weight:6`
+  - `*.attn.proj.weight:6`
+
+Results:
+
+- baseline 8-bit export:
+  - artifact `14,813,668`
+  - exact `val_bpb = 2.35586296`
+- mixed profile export:
+  - artifact `7,244,516`
+  - exact `val_bpb = 2.38623309`
+- delta vs 8-bit:
+  - bytes `-7,569,152`
+  - `val_bpb +0.03037013`
+
+This is the key read:
+
+- mixed bits are not a direct drop-in win on the current trained model
+- but they buy enormous artifact headroom
+- that means the next serious question is no longer "does mixed precision help by itself?"
+- it is "can the saved bytes fund enough additional model capacity to beat the current capped leader after retraining?"
+
+That is a borrowed-GPU question, not a local M4 question.
+
+Updated recommendation:
+
+- keep the current capped leader:
+  - `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- keep sliding eval as a separate parity track
+- kill the first bigram-hash family
+- use any borrowed NVIDIA compute for one or two capacity-funded retraining runs under the mixed-bit export profile

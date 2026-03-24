@@ -1452,6 +1452,48 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
     return obj, stats
 
 
+def _apply_residual_low_rank(out_arr: np.ndarray, name: str, sidecar: dict[str, object]) -> np.ndarray:
+    left = np.asarray(sidecar["left"], dtype=np.float32)
+    right = np.asarray(sidecar["right"], dtype=np.float32)
+    if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[0]:
+        raise ValueError(f"Invalid residual sidecar shapes for {name}: left={left.shape} right={right.shape}")
+    if out_arr.ndim != 2 or left.shape[0] != out_arr.shape[0] or right.shape[1] != out_arr.shape[1]:
+        raise ValueError(
+            f"Residual sidecar shape mismatch for {name}: tensor={out_arr.shape} left={left.shape} right={right.shape}"
+        )
+    return out_arr + (left @ right)
+
+
+def _apply_residual_tiled_low_rank(out_arr: np.ndarray, name: str, tiles: object) -> np.ndarray:
+    if out_arr.ndim != 2 or not isinstance(tiles, list):
+        raise ValueError(f"Invalid tiled residual sidecar for {name}")
+    for tile in tiles:
+        if not isinstance(tile, dict):
+            raise ValueError(f"Invalid tiled residual entry for {name}: {tile!r}")
+        row_start = int(tile["row_start"])
+        row_end = int(tile["row_end"])
+        col_start = int(tile["col_start"])
+        col_end = int(tile["col_end"])
+        if not (0 <= row_start < row_end <= out_arr.shape[0] and 0 <= col_start < col_end <= out_arr.shape[1]):
+            raise ValueError(
+                f"Residual tiled sidecar bounds mismatch for {name}: "
+                f"tile=({row_start}:{row_end}, {col_start}:{col_end}) tensor={out_arr.shape}"
+            )
+        left = np.asarray(tile["left"], dtype=np.float32)
+        right = np.asarray(tile["right"], dtype=np.float32)
+        tile_rows = row_end - row_start
+        tile_cols = col_end - col_start
+        if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[0]:
+            raise ValueError(f"Invalid tiled residual factor shapes for {name}: left={left.shape} right={right.shape}")
+        if left.shape[0] != tile_rows or right.shape[1] != tile_cols:
+            raise ValueError(
+                f"Residual tiled sidecar factor mismatch for {name}: "
+                f"tile=({tile_rows}, {tile_cols}) left={left.shape} right={right.shape}"
+            )
+        out_arr[row_start:row_end, col_start:col_end] += left @ right
+    return out_arr
+
+
 def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.array]:
     out: dict[str, mx.array] = {}
     qmeta = quant_obj.get("qmeta", {})
@@ -1469,44 +1511,19 @@ def dequantize_state_dict_int8(quant_obj: dict[str, object]) -> dict[str, mx.arr
             out_arr = q_np.astype(np.float32) * float(scale)
         sidecar = sidecars.get(name)
         if isinstance(sidecar, dict) and sidecar.get("scheme") == "residual_low_rank_v1":
-            left = np.asarray(sidecar["left"], dtype=np.float32)
-            right = np.asarray(sidecar["right"], dtype=np.float32)
-            if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[0]:
-                raise ValueError(f"Invalid residual sidecar shapes for {name}: left={left.shape} right={right.shape}")
-            if out_arr.ndim != 2 or left.shape[0] != out_arr.shape[0] or right.shape[1] != out_arr.shape[1]:
-                raise ValueError(
-                    f"Residual sidecar shape mismatch for {name}: tensor={out_arr.shape} left={left.shape} right={right.shape}"
-                )
-            out_arr = out_arr + (left @ right)
+            out_arr = _apply_residual_low_rank(out_arr, name, sidecar)
             used_sidecars.add(name)
         elif isinstance(sidecar, dict) and sidecar.get("scheme") == "residual_tiled_low_rank_v1":
+            out_arr = _apply_residual_tiled_low_rank(out_arr, name, sidecar.get("tiles"))
+            used_sidecars.add(name)
+        elif isinstance(sidecar, dict) and sidecar.get("scheme") == "residual_mixed_low_rank_v1":
+            global_sidecar = sidecar.get("global")
             tiles = sidecar.get("tiles")
-            if out_arr.ndim != 2 or not isinstance(tiles, list):
-                raise ValueError(f"Invalid tiled residual sidecar for {name}")
-            for tile in tiles:
-                if not isinstance(tile, dict):
-                    raise ValueError(f"Invalid tiled residual entry for {name}: {tile!r}")
-                row_start = int(tile["row_start"])
-                row_end = int(tile["row_end"])
-                col_start = int(tile["col_start"])
-                col_end = int(tile["col_end"])
-                if not (0 <= row_start < row_end <= out_arr.shape[0] and 0 <= col_start < col_end <= out_arr.shape[1]):
-                    raise ValueError(
-                        f"Residual tiled sidecar bounds mismatch for {name}: "
-                        f"tile=({row_start}:{row_end}, {col_start}:{col_end}) tensor={out_arr.shape}"
-                    )
-                left = np.asarray(tile["left"], dtype=np.float32)
-                right = np.asarray(tile["right"], dtype=np.float32)
-                tile_rows = row_end - row_start
-                tile_cols = col_end - col_start
-                if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[0]:
-                    raise ValueError(f"Invalid tiled residual factor shapes for {name}: left={left.shape} right={right.shape}")
-                if left.shape[0] != tile_rows or right.shape[1] != tile_cols:
-                    raise ValueError(
-                        f"Residual tiled sidecar factor mismatch for {name}: "
-                        f"tile=({tile_rows}, {tile_cols}) left={left.shape} right={right.shape}"
-                    )
-                out_arr[row_start:row_end, col_start:col_end] += left @ right
+            if not isinstance(global_sidecar, dict):
+                raise ValueError(f"Invalid mixed residual sidecar for {name}: missing global carrier")
+            out_arr = _apply_residual_low_rank(out_arr, name, global_sidecar)
+            if tiles is not None:
+                out_arr = _apply_residual_tiled_low_rank(out_arr, name, tiles)
             used_sidecars.add(name)
         out[name] = mx.array(out_arr, dtype=MX_DTYPE_FROM_NAME[dtype_name])
     for name, arr in quant_obj["passthrough"].items():

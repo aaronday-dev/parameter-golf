@@ -1916,3 +1916,56 @@ Current recommendation after this sweep:
 - keep the family alive only in the broader sense of "whole-tensor structured carrier"
 - downrank pure low-rank residuals for this tensor
 - next candidates, if this line continues, should preserve local/block structure rather than only global low-rank structure
+
+## 2026-03-23 - mixed global+local residual sidecar on the sacred tensor
+
+After the plain rank-64 residual sidecar became the capped full leader, the next carrier family tested was:
+
+- same sacred tensor: `blocks.0.mlp.proj.weight`
+- same global carrier: rank-64 fp16 residual sidecar
+- plus a small local correction on the leftover residual
+- local carrier shape:
+  - column tiles of width `1024`
+  - per-tile local ranks `4, 8, 12, 16`
+
+This was implemented offline via:
+
+- `scripts/sweep_mixed_residual_sidecar.py`
+- `train_gpt_mlx.py` mixed sidecar dequant support
+
+The quick `128`-sequence full-data slice did show one interesting candidate:
+
+- global rank `64` + local rank `4`
+- artifact `15,132,276`
+- `val_bpb = 2.39773432`
+- improvement vs plain global rank-64 on the slice:
+  - `-0.00004233 bpb`
+- result artifact:
+  - `results/mixed_residual_sidecar_keepf_full_v2_128.json`
+
+Because that was a real slice win under cap, it was promoted immediately to full exact validation on all `62,021,632` validation tokens:
+
+- global-only rank `64` control:
+  - artifact `15,109,864`
+  - exact `val_bpb = 2.35570158`
+- mixed `g64 + tile1024 + local4`:
+  - artifact `15,132,276`
+  - exact `val_bpb = 2.35570394`
+  - delta vs global-only:
+    - `+0.00000236 bpb`
+    - `+22,412` bytes
+- result artifact:
+  - `results/mixed_residual_sidecar_rank64_tile1024_local4_fullval.json`
+
+So the full exact read is:
+
+- the slice signal was real enough to justify promotion
+- but it did not survive full validation
+- naive mixed global+local correction does not beat the plain rank-64 global sidecar
+
+Updated recommendation:
+
+- keep the capped rank-64 global residual sidecar as the live leader
+- downrank this first mixed-global-local variant
+- if this line continues, the next structured carrier should not be "global low-rank plus uniform column tiles"
+- any future local correction should have a fresher reason than this simple leftover-residual tiling

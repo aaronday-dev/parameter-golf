@@ -1,0 +1,103 @@
+{
+  "keep_float": {
+    "artifact_bytes": 16263292,
+    "val_bpb": 2.397495073362189,
+    "payload_bytes": 27682080
+  },
+  "plain_quant": {
+    "artifact_bytes": 14813572,
+    "val_bpb": 2.3978906305155037,
+    "payload_bytes": 26634528
+  },
+  "target_tensor": "blocks.0.mlp.proj.weight",
+  "residual_relative_norm": 0.09418993676386687,
+  "rows": [
+    {
+      "mode": "mixed",
+      "global_rank": 64,
+      "tile_cols": 1024,
+      "local_rank": 4,
+      "artifact_bytes": 15132276,
+      "artifact_delta_vs_keepf": -1131016,
+      "artifact_delta_vs_plain": 318704,
+      "bytes_over_cap": -867724,
+      "val_bpb": 2.397734323946967,
+      "bpb_delta_vs_keepf": 0.00023925058477791694,
+      "bpb_delta_vs_plain": -0.00015630656853682368,
+      "bpb_delta_vs_global_same_rank": -4.2330049668137804e-05,
+      "artifact_delta_vs_global_same_rank": 22412,
+      "sidecar_raw_bytes": 352256,
+      "payload_bytes": 26986784,
+      "leftover_residual_relative_norm": 0.08226127922534943
+    },
+    {
+      "mode": "global_only",
+      "global_rank": 64,
+      "tile_cols": null,
+      "local_rank": null,
+      "artifact_bytes": 15109864,
+      "artifact_delta_vs_keepf": -1153428,
+      "artifact_delta_vs_plain": 296292,
+      "bytes_over_cap": -890136,
+      "val_bpb": 2.397776653996635,
+      "bpb_delta_vs_keepf": 0.00028158063444605475,
+      "bpb_delta_vs_plain": -0.00011397651886868587,
+      "sidecar_raw_bytes": 327680,
+      "payload_bytes": 26962208
+    },
+    {
+      "mode": "mixed",
+      "global_rank": 64,
+      "tile_cols": 1024,
+      "local_rank": 8,
+      "artifact_bytes": 15154480,
+      "artifact_delta_vs_keepf": -1108812,
+      "artifact_delta_vs_plain": 340908,
+      "bytes_over_cap": -845520,
+      "val_bpb": 2.3977880945505987,
+      "bpb_delta_vs_keepf": 0.0002930211884097922,
+      "bpb_delta_vs_plain": -0.00010253596490494843,
+      "bpb_delta_vs_global_same_rank": 1.1440553963737443e-05,
+      "artifact_delta_vs_global_same_rank": 44616,
+      "sidecar_raw_bytes": 376832,
+      "payload_bytes": 27011360,
+      "leftover_residual_relative_norm": 0.08226127922534943
+    },
+    {
+      "mode": "mixed",
+      "global_rank": 64,
+      "tile_cols": 1024,
+      "local_rank": 16,
+      "artifact_bytes": 15198880,
+      "artifact_delta_vs_keepf": -1064412,
+      "artifact_delta_vs_plain": 385308,
+      "bytes_over_cap": -801120,
+      "val_bpb": 2.3977948158760527,
+      "bpb_delta_vs_keepf": 0.0002997425138637766,
+      "bpb_delta_vs_plain": -9.581463945096402e-05,
+      "bpb_delta_vs_global_same_rank": 1.816187941772185e-05,
+      "artifact_delta_vs_global_same_rank": 89016,
+      "sidecar_raw_bytes": 425984,
+      "payload_bytes": 27060512,
+      "leftover_residual_relative_norm": 0.08226127922534943
+    },
+    {
+      "mode": "mixed",
+      "global_rank": 64,
+      "tile_cols": 1024,
+      "local_rank": 12,
+      "artifact_bytes": 15176688,
+      "artifact_delta_vs_keepf": -1086604,
+      "artifact_delta_vs_plain": 363116,
+      "bytes_over_cap": -823312,
+      "val_bpb": 2.3978104036308294,
+      "bpb_delta_vs_keepf": 0.0003153302686405013,
+      "bpb_delta_vs_plain": -8.022688467423933e-05,
+      "bpb_delta_vs_global_same_rank": 3.374963419444654e-05,
+      "artifact_delta_vs_global_same_rank": 66824,
+      "sidecar_raw_bytes": 401408,
+      "payload_bytes": 27035936,
+      "leftover_residual_relative_norm": 0.08226127922534943
+    }
+  ]
+}

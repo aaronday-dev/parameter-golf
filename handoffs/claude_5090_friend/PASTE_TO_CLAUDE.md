@@ -12,12 +12,17 @@ Objective:
 - optionally run one second CUDA job only if the first one is genuinely promising
 - keep the human out of the loop unless there is a real blocker
 
+If anything looks broken, risky, or confusing:
+
+- stop after the preflight step and report readiness status instead of improvising
+
 Important local facts:
 
 - current capped local leader is:
   - `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
   - exact `val_bpb = 2.35570158`
   - artifact `15,109,864` bytes
+- fp32-factor residual sidecars were checked locally and did not justify more bytes; do not spend borrowed GPU time there
 - bigram hash already lost locally; do not spend time there
 - sliding eval exists, but use contiguous eval for the main gating result unless asked otherwise
 - the live hypothesis is compression-funded capacity:
@@ -42,12 +47,18 @@ What I want you to do:
    - Verify CUDA is available from Python/PyTorch.
    - If the full `sp1024` dataset/tokenizer are missing, download them with:
      - `.venv/bin/python data/cached_challenge_fineweb.py --variant sp1024`
+   - If the human asks for the safest possible start, stop here and report:
+     - whether CUDA works
+     - whether the dataset/tokenizer are ready
+     - the exact command you would run next for the primary job
 
 2. Run the primary job:
    - `RUN_MODE=primary handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh`
 
 Primary job intent:
 
+- this is the only run that should happen by default
+- do not ask the human to tune knobs or babysit loop commands
 - `10` layers
 - `MLP 3x`
 - `MODEL_DIM=512`
@@ -89,6 +100,7 @@ Secondary job intent:
 Constraints:
 
 - Do not reopen bigram-hash or soft-floor branches.
+- Do not reopen sacred-tensor carrier sweeps or fp32 sidecar branches on the borrowed GPU.
 - Do not refactor unrelated code.
 - Do not use `archive_parameter_golf_run.py` to invent archived reports from mutable logs state.
 - Keep the human out of run loops unless you hit a real blocker.

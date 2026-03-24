@@ -7,6 +7,7 @@ Goal:
 - run one high-EV CUDA experiment, and optionally one second run
 - do not waste time on dead local branches
 - do not ask the human to copy-paste a bunch of loop commands if Claude can run them
+- keep the handoff low-pressure enough that a nervous human can still start with a preflight-only pass
 
 Use this repo snapshot:
 
@@ -20,6 +21,7 @@ Current local facts that matter:
   - artifact `15,109,864`
 - sliding eval now exists as a separate parity track
 - first bigram-hash token-local bias lost and is downranked
+- fp32-factor residual sidecars did not change the frontier and should stay off the borrowed-GPU path
 - mixed-bit offline export is not a direct win on the current model, but buys massive headroom:
   - baseline 8-bit exact `2.35586296`, artifact `14,813,668`
   - mixed-bit exact `2.38623309`, artifact `7,244,516`
@@ -45,6 +47,7 @@ Objective:
 - run one primary CUDA training job on the friend's single NVIDIA 5090
 - optionally run one second CUDA job only if the first one is promising
 - keep the human out of the loop unless there is a real blocker
+- if anything looks risky or confusing, stop after preflight and report readiness instead of improvising
 
 Important local facts:
 - current capped local leader is:
@@ -52,6 +55,7 @@ Important local facts:
   - exact val_bpb = 2.35570158
   - artifact = 15,109,864 bytes
 - bigram hash already lost locally; do not spend time there
+- fp32-factor residual sidecars were checked locally and did not justify more bytes; do not spend borrowed GPU time there
 - sliding eval exists, but use contiguous eval for the main gating result unless asked otherwise
 - the live hypothesis is compression-funded capacity:
   - lower-bit mixed precision buys huge byte headroom
@@ -61,7 +65,10 @@ What is already implemented in this branch:
 - sliding eval in train_gpt.py and train_gpt_mlx.py
 - mixed-bit quantization in train_gpt.py via INTX_BITS_BY_NAME
 - CUDA wrapper script:
-  - scripts/run_parameter_golf_cuda_5090.sh
+  - handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh
+
+Evidence file:
+- handoffs/claude_5090_friend/mixed_precision_quant_fullval.json
 
 What I want you to do:
 
@@ -70,11 +77,17 @@ What I want you to do:
    - Verify CUDA is available from Python/PyTorch.
    - If the full sp1024 dataset/tokenizer are missing, download them with:
      .venv/bin/python data/cached_challenge_fineweb.py --variant sp1024
+   - If the human asks for the safest possible start, stop here and report:
+     - whether CUDA works
+     - whether the dataset/tokenizer are ready
+     - the exact command you would run next for the primary job
 
 2. Run the primary job:
-   - RUN_MODE=primary scripts/run_parameter_golf_cuda_5090.sh
+   - RUN_MODE=primary handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh
 
 Primary job intent:
+- this is the only run that should happen by default
+- do not ask the human to tune knobs or babysit loop commands
 - 10 layers
 - MLP 3x
 - model_dim 512
@@ -96,7 +109,7 @@ Encouraging means:
 - exact roundtrip val_bpb is close enough that the result is clearly the best architecture-side progress in this branch
 
 If encouraging, run:
-- RUN_MODE=secondary scripts/run_parameter_golf_cuda_5090.sh
+- RUN_MODE=secondary handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh
 
 Secondary job intent:
 - same recipe, but 11 layers instead of 10
@@ -110,12 +123,13 @@ Secondary job intent:
 
 Constraints:
 - Do not reopen bigram-hash or soft-floor branches.
+- Do not reopen sacred-tensor carrier sweeps or fp32 sidecar branches on the borrowed GPU.
 - Do not refactor unrelated code.
 - Do not use archive_parameter_golf_run.py to invent archived reports from mutable logs state.
 - Keep the human out of run loops unless you hit a real blocker.
 
 If you need a safe first check before the full run:
-- inspect scripts/run_parameter_golf_cuda_5090.sh
+- inspect handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh
 - verify train_gpt.py can see CUDA
 - then run the primary job directly
 ```
@@ -124,11 +138,15 @@ If you need a safe first check before the full run:
 
 1. Send your friend this branch name:
    - `codex/public-parity-gap`
-2. Send your friend this file:
-   - `docs/claude_5090_friend_package.md`
+2. Send your friend this folder:
+   - `handoffs/claude_5090_friend/`
 3. Tell your friend:
-   - open the repo
-   - check out `codex/public-parity-gap`
-   - paste the `What Claude Should Do` block into Claude
+   - open `handoffs/claude_5090_friend/START_HERE.md`
+   - if they feel nervous, they can ask Claude to do only the preflight first
+
+Low-pressure fallback:
+
+- a successful preflight-only pass is still useful next week
+- the friend does not need to babysit loops or pick hyperparameters by hand
 
 That is the cleanest handoff with the least translation burden.

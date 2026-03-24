@@ -2069,3 +2069,64 @@ Updated recommendation:
 - keep sliding eval as a separate parity track
 - kill the first bigram-hash family
 - use any borrowed NVIDIA compute for one or two capacity-funded retraining runs under the mixed-bit export profile
+
+
+## 2026-03-24 - fp32-factor residual-sidecar sweep on the sacred tensor
+
+A bounded follow-up sweep tested the same global residual-sidecar family as the earlier SVD carrier, but stored the residual factors in `fp32` instead of `fp16`.
+
+Setup:
+
+- source float artifact:
+  - `logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+- target tensor:
+  - `blocks.0.mlp.proj.weight`
+- eval slice:
+  - `128` sequences from the full published validation prefix
+- tested ranks:
+  - `32, 48, 64`
+- result artifact:
+  - `results/fp32_factor_residual_sidecar_keepf_full_v2_128.json`
+
+Reference points on the same slice:
+
+- keep-float sacred tensor:
+  - artifact `16,263,292`
+  - `val_bpb = 2.39749507`
+- plain quant baseline:
+  - artifact `14,813,572`
+  - `val_bpb = 2.39789063`
+
+fp32-factor results:
+
+- rank `32`:
+  - artifact `15,116,588`
+  - `val_bpb = 2.39775620`
+  - delta vs plain quant:
+    - `-0.00013443 bpb`
+    - `+303,016` bytes
+- rank `48`:
+  - artifact `15,268,148`
+  - `val_bpb = 2.39779124`
+  - delta vs plain quant:
+    - `-0.00009939 bpb`
+    - `+454,576` bytes
+- rank `64`:
+  - artifact `15,419,224`
+  - `val_bpb = 2.39773304`
+  - delta vs plain quant:
+    - `-0.00015759 bpb`
+    - `+605,652` bytes
+
+Read:
+
+- all tested fp32-factor variants stay under the `16,000,000` byte cap
+- rank `64` is the best quality point in this bounded fp32 sweep
+- but fp32 factors are materially less byte-efficient than the older fp16 sidecars
+- compared with the earlier fp16 rank-64 result (`15,109,864`, `2.39777665`), fp32 rank `64` improves the slice by only about `-0.00004361 bpb` while costing `+309,360` bytes
+
+Updated recommendation:
+
+- keep the fp16 rank-64 residual sidecar as the live capped leader in this family
+- treat fp32-factor sidecars as an interesting quality nudge, not a better frontier point
+- the next queued task remains the 5090 handoff refresh only if a later result changes the broader conclusion

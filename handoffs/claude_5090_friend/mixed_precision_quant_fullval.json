@@ -1,6 +1,6 @@
 {
-  "float_artifact": "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz",
-  "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+  "float_artifact": "logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz",
+  "calibration_center_bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
   "compare_capped_bpb": 2.35570158,
   "compare_capped_artifact_bytes": 15109864,
   "baseline_8bit": {
@@ -8,7 +8,31 @@
     "val_bpb": 2.355862958237435,
     "payload_bytes": 26634528
   },
-  "mixed_profile": {
+  "recommended_profile": {
+    "label": "mlp6_attn6",
+    "bits_profile": "*.mlp.fc.weight:6,*.mlp.proj.weight:6,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+    "artifact_bytes": 9521536,
+    "val_bpb": 2.364808808986397,
+    "payload_bytes": 20146464,
+    "artifact_delta_vs_8bit": -5292132,
+    "bpb_delta_vs_8bit": 0.008945850748962147,
+    "artifact_delta_vs_capped_leader": -5588328,
+    "bpb_delta_vs_capped_leader": 0.009107228986397153
+  },
+  "backup_profile": {
+    "label": "mlp5_attn7",
+    "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:7,*.attn.c_k.weight:7,*.attn.c_v.weight:7,*.attn.proj.weight:7",
+    "artifact_bytes": 8527564,
+    "val_bpb": 2.3837106068321563,
+    "payload_bytes": 18671904,
+    "artifact_delta_vs_8bit": -6286104,
+    "bpb_delta_vs_8bit": 0.02784764859472144,
+    "artifact_delta_vs_capped_leader": -6582300,
+    "bpb_delta_vs_capped_leader": 0.028009026832156447
+  },
+  "rejected_center_profile": {
+    "label": "mlp5_attn6",
+    "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
     "artifact_bytes": 7244516,
     "val_bpb": 2.386233089440687,
     "payload_bytes": 17787168,
@@ -16,5 +40,10 @@
     "bpb_delta_vs_8bit": 0.03037013120325227,
     "artifact_delta_vs_capped_leader": -7865348,
     "bpb_delta_vs_capped_leader": 0.030531509440687277
+  },
+  "summary": {
+    "best_bpb_label": "mlp6_attn6",
+    "smallest_artifact_label": "mlp4_attn6",
+    "profile_count": 5
   }
 }

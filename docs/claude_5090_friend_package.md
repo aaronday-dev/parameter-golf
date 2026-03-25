@@ -1,6 +1,6 @@
 # Claude 5090 Run Package
 
-This is the single handoff file for a friend with one NVIDIA `5090` and a solid CPU.
+This is the single handoff package for a friend with one NVIDIA `5090` and a solid CPU.
 
 Goal:
 
@@ -22,10 +22,11 @@ Current local facts that matter:
 - sliding eval now exists as a separate parity track
 - first bigram-hash token-local bias lost and is downranked
 - fp32-factor residual sidecars did not change the frontier and should stay off the borrowed-GPU path
-- mixed-bit offline export is not a direct win on the current model, but buys massive headroom:
+- mixed-bit offline export is not a direct win on the current model, but the full calibration sweep clarified the useful knee:
   - baseline 8-bit exact `2.35586296`, artifact `14,813,668`
-  - mixed-bit exact `2.38623309`, artifact `7,244,516`
-  - so mixed bits buy about `7.57 MB` of headroom at a cost of about `+0.03037` bpb
+  - recommended `mlp6_attn6` exact `2.36480881`, artifact `9,521,536`
+  - backup `mlp5_attn7` exact `2.38371061`, artifact `8,527,564`
+  - the old `mlp5_attn6` center point is no longer the default
 
 This means the `5090` should be used for exactly one thing:
 
@@ -36,9 +37,7 @@ This means the `5090` should be used for exactly one thing:
 Paste the block below to Claude on the friend machine, from inside the repo.
 
 ```text
-Work only in this repo:
-
-/Users/aaronday/dev/parameter-golf
+Work only in the currently checked-out repository root.
 
 Use the checked-out branch:
 - codex/public-parity-gap
@@ -60,6 +59,8 @@ Important local facts:
 - the live hypothesis is compression-funded capacity:
   - lower-bit mixed precision buys huge byte headroom
   - the question is whether that headroom can fund a larger model that beats 2.35570158
+- the current recommended mixed-bit default is mlp6_attn6
+- mlp5_attn7 is the smaller backup only if tighter byte pressure matters
 
 What is already implemented in this branch:
 - sliding eval in train_gpt.py and train_gpt_mlx.py
@@ -92,9 +93,9 @@ Primary job intent:
 - MLP 3x
 - model_dim 512
 - heads 8 / kv heads 4
-- mixed-bit export profile:
-  - *.mlp.fc.weight:5
-  - *.mlp.proj.weight:5
+- mixed-bit export profile (mlp6_attn6):
+  - *.mlp.fc.weight:6
+  - *.mlp.proj.weight:6
   - *.attn.c_q.weight:6
   - *.attn.c_k.weight:6
   - *.attn.c_v.weight:6
@@ -113,6 +114,7 @@ If encouraging, run:
 
 Secondary job intent:
 - same recipe, but 11 layers instead of 10
+- keep the same mlp6_attn6 profile unless there is a concrete reason to try the smaller mlp5_attn7 backup
 
 4. After runs finish, report:
 - run ids

@@ -1,6 +1,4 @@
-Work only in this repo:
-
-`/Users/aaronday/dev/parameter-golf`
+Work only in the currently checked-out repository root.
 
 Use this checked-out branch:
 
@@ -28,6 +26,8 @@ Important local facts:
 - the live hypothesis is compression-funded capacity:
   - lower-bit mixed precision buys huge byte headroom
   - the question is whether that headroom can fund a larger model that beats `2.35570158`
+- the current recommended mixed-bit default is `mlp6_attn6`
+- `mlp5_attn7` is the smaller backup only if tighter byte pressure matters
 
 What is already implemented in this branch:
 
@@ -64,9 +64,9 @@ Primary job intent:
 - `MODEL_DIM=512`
 - `NUM_HEADS=8`
 - `NUM_KV_HEADS=4`
-- mixed-bit export profile:
-  - `*.mlp.fc.weight:5`
-  - `*.mlp.proj.weight:5`
+- mixed-bit export profile (`mlp6_attn6`):
+  - `*.mlp.fc.weight:6`
+  - `*.mlp.proj.weight:6`
   - `*.attn.c_q.weight:6`
   - `*.attn.c_k.weight:6`
   - `*.attn.c_v.weight:6`
@@ -88,6 +88,7 @@ If encouraging, run:
 Secondary job intent:
 
 - same recipe, but `11` layers instead of `10`
+- keep the same `mlp6_attn6` profile unless you have a concrete reason to try the smaller `mlp5_attn7` backup
 
 4. After runs finish, report:
 

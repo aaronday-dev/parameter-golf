@@ -9,7 +9,7 @@ If anything feels off, it is fine to stop after the preflight check.
 ## What To Do
 
 1. Open this repo:
-   - `/Users/aaronday/dev/parameter-golf`
+   - the checked-out `parameter-golf` repo on your machine
 2. Check out this branch:
    - `codex/public-parity-gap`
 3. Open:

@@ -4,17 +4,13 @@ This folder is the single handoff package for a friend with one NVIDIA `5090`.
 
 If your friend is uneasy, start here:
 
-- open [START_HERE.md](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/START_HERE.md)
+- open `START_HERE.md`
 - let them choose a preflight-only pass first
 - only move to training once the environment check feels boring and legible
 
 Use this repo branch:
 
 - `codex/public-parity-gap`
-
-Snapshot:
-
-- commit: `dd89789`
 
 ## Goal
 
@@ -36,9 +32,12 @@ Why this is the right borrowed-GPU test:
   - baseline 8-bit export:
     - `14,813,668` bytes
     - `2.35586296`
-  - mixed-bit export:
-    - `7,244,516` bytes
-    - `2.38623309`
+  - recommended mixed-bit export (`mlp6_attn6`):
+    - `9,521,536` bytes
+    - `2.36480881`
+  - smaller backup export (`mlp5_attn7`):
+    - `8,527,564` bytes
+    - `2.38371061`
 - that means the live question is no longer "does mixed precision help by itself?"
 - it is:
   - "can mixed precision buy enough additional model capacity to win after retraining?"
@@ -46,16 +45,16 @@ Why this is the right borrowed-GPU test:
 
 ## What Is In This Folder
 
-- [README.md](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/README.md)
+- `README.md`
   - human-facing instructions
-- [START_HERE.md](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/START_HERE.md)
+- `START_HERE.md`
   - low-pressure entry point for a nervous human
-- [PASTE_TO_CLAUDE.md](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/PASTE_TO_CLAUDE.md)
+- `PASTE_TO_CLAUDE.md`
   - the exact instruction block to paste into Claude
-- [run_parameter_golf_cuda_5090.sh](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh)
+- `run_parameter_golf_cuda_5090.sh`
   - one-command CUDA wrapper for the primary/secondary runs
-- [mixed_precision_quant_fullval.json](/Users/aaronday/dev/parameter-golf/handoffs/claude_5090_friend/mixed_precision_quant_fullval.json)
-  - the offline evidence that motivates the run
+- `mixed_precision_quant_fullval.json`
+  - the full-validation mixed-bit calibration summary that motivates the run
 
 ## What You Send Your Friend
 
@@ -79,12 +78,13 @@ Primary run:
 - `10` layers
 - `MLP 3x`
 - `512` width
-- mixed-bit export profile
+- mixed-bit export profile (`mlp6_attn6`)
 
 Secondary run only if primary is encouraging:
 
 - same recipe
 - `11` layers instead of `10`
+- keep the same `mlp6_attn6` profile unless there is a specific reason to override it
 
 Encouraging means:
 

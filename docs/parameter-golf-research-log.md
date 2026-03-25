@@ -2219,3 +2219,27 @@ Updated recommendation:
 - keep `mlp5_attn7` as a smaller backup profile if tighter byte pressure matters
 - stop treating the earlier `mlp5_attn6` point as the best mixed-bit default
 - the next queued task is now the 5090 handoff refresh, because the recommended mixed-bit profile changed materially
+
+## 2026-03-25 - refreshed 5090 handoff package for the calibrated mixed-bit default
+
+The `5090` handoff package was refreshed after the mixed-bit calibration sweep changed the recommendation from the old `mlp5_attn6` center point to `mlp6_attn6`.
+
+Package updates:
+
+- `handoffs/claude_5090_friend/run_parameter_golf_cuda_5090.sh`
+  - default `INTX_BITS_BY_NAME` now uses `mlp6_attn6`
+- `scripts/run_parameter_golf_cuda_5090.sh`
+  - matching repo-side wrapper now uses the same `mlp6_attn6` default to avoid drift
+- `handoffs/claude_5090_friend/README.md`
+  - now explains the calibrated recommendation and names `mlp5_attn7` as the smaller backup
+- `handoffs/claude_5090_friend/PASTE_TO_CLAUDE.md`
+  - now tells Claude to keep the primary and secondary CUDA runs on `mlp6_attn6`
+- `handoffs/claude_5090_friend/mixed_precision_quant_fullval.json`
+  - now carries the calibration summary instead of only the earlier single-point `5/6` evidence
+
+Read:
+
+- the borrowed-GPU package is now aligned with the best offline mixed-bit calibration result we have locally
+- the package still points at the same CUDA training hypothesis:
+  - use mixed-bit compression headroom to fund extra capacity, not to claim an immediate export-only win
+- there are no remaining incomplete items in this bounded scout queue after the handoff refresh

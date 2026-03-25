@@ -13,7 +13,7 @@ fi
 
 RUN_MODE="${RUN_MODE:-primary}"
 
-INTX_PROFILE_DEFAULT="*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6"
+INTX_PROFILE_DEFAULT="*.mlp.fc.weight:6,*.mlp.proj.weight:6,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6"
 
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"

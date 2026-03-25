@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-23
+Last updated: 2026-03-25
 
 ## Purpose
 
@@ -2131,7 +2131,6 @@ Updated recommendation:
 - treat fp32-factor sidecars as an interesting quality nudge, not a better frontier point
 - the next queued task remains the 5090 handoff refresh only if a later result changes the broader conclusion
 
-
 ## 2026-03-25 - scout monitor on active mixed-bit calibration sweep
 
 During the `Golf Scout` automation run at `2026-03-25T11:58:55Z`, the repo was not idle:
@@ -2157,3 +2156,66 @@ Read:
 - no new conclusions are available yet from the calibration sweep
 - no 5090 handoff refresh is justified while the result is still pending
 - once the active calibration run finishes, the automation queue should return to task `1`: the full fp32-factor residual-sidecar sweep for ranks `32,48,64`
+
+## 2026-03-25 - mixed-bit profile calibration around the promoted 5/6 export
+
+The earlier mixed-bit result established that the first local `5/6` profile bought huge byte headroom, but it did not answer a more useful question:
+
+- which side of that profile is doing the real work
+- whether the local knee is "give attention more bits" or "stop starving the MLP weights"
+
+To answer that, a bounded full-validation calibration sweep was run on the same promoted sacred-tensor float artifact:
+
+- source float artifact:
+  - `logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+- output artifact:
+  - `results/mixed_precision_quant_calibration_fullval.json`
+- fixed baseline:
+  - 8-bit export at `14,813,668` bytes and exact `val_bpb = 2.35586296`
+- tested neighborhood:
+  - `mlp4_attn6`
+  - `mlp5_attn5`
+  - `mlp5_attn6` (the existing center point)
+  - `mlp5_attn7`
+  - `mlp6_attn6`
+
+Results:
+
+- `mlp4_attn6`:
+  - artifact `4,421,084`
+  - exact `val_bpb = 2.63017452`
+  - this is a hard collapse; `4`-bit MLP weights are too aggressive here
+- `mlp5_attn5`:
+  - artifact `6,196,420`
+  - exact `val_bpb = 2.39791617`
+  - worse than the current `5/6` center by `+0.01168308 bpb`
+- `mlp5_attn6`:
+  - artifact `7,244,516`
+  - exact `val_bpb = 2.38623309`
+  - reproduced the earlier single-point sweep exactly
+- `mlp5_attn7`:
+  - artifact `8,527,564`
+  - exact `val_bpb = 2.38371061`
+  - improves on `5/6` by `-0.00252248 bpb` for `+1,283,048` bytes
+- `mlp6_attn6`:
+  - artifact `9,521,536`
+  - exact `val_bpb = 2.36480881`
+  - improves on `5/6` by `-0.02142428 bpb` for `+2,277,020` bytes
+  - still stays `5,588,328` bytes under the current capped leader artifact
+
+Read:
+
+- the dominant local quality lever is MLP precision, not attention precision
+- raising attention from `6` to `7` bits helps a little
+- raising MLP from `5` to `6` bits helps a lot more
+- lowering attention to `5` bits is survivable but clearly worse
+- lowering MLP to `4` bits is not a viable trade on this artifact family
+
+Updated recommendation:
+
+- keep the current local capped leader unchanged:
+  - `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- if mixed-bit export is used to fund a borrowed-GPU retraining run, promote `mlp6_attn6` to the primary export profile candidate
+- keep `mlp5_attn7` as a smaller backup profile if tighter byte pressure matters
+- stop treating the earlier `mlp5_attn6` point as the best mixed-bit default
+- the next queued task is now the 5090 handoff refresh, because the recommended mixed-bit profile changed materially

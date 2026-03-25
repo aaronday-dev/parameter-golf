@@ -2130,3 +2130,30 @@ Updated recommendation:
 - keep the fp16 rank-64 residual sidecar as the live capped leader in this family
 - treat fp32-factor sidecars as an interesting quality nudge, not a better frontier point
 - the next queued task remains the 5090 handoff refresh only if a later result changes the broader conclusion
+
+
+## 2026-03-25 - scout monitor on active mixed-bit calibration sweep
+
+During the `Golf Scout` automation run at `2026-03-25T11:58:55Z`, the repo was not idle:
+
+- active command:
+  - `.venv/bin/python scripts/sweep_mixed_precision_quant_calibration.py --output-json results/mixed_precision_quant_calibration_fullval.json`
+- observed elapsed time at the last check:
+  - about `9m 10s`
+- branch:
+  - `codex/scout-loop`
+- dirty state:
+  - one untracked file: `scripts/sweep_mixed_precision_quant_calibration.py`
+  - that file is related to the live run, because the running Python process is executing it
+
+Observed state:
+
+- `results/mixed_precision_quant_calibration_fullval.json` does not exist yet
+- that is expected for this script, because it writes the JSON payload only after the baseline and all calibration profiles finish
+- the process has MLX / Metal libraries loaded and still has live stdio attached to a terminal, so this looks like an in-progress evaluation rather than a failed launch
+
+Read:
+
+- no new conclusions are available yet from the calibration sweep
+- no 5090 handoff refresh is justified while the result is still pending
+- once the active calibration run finishes, the automation queue should return to task `1`: the full fp32-factor residual-sidecar sweep for ranks `32,48,64`

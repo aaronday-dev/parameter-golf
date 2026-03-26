@@ -1675,6 +1675,11 @@ def load_validation_tokens(pattern: str, seq_len: int) -> np.ndarray:
 def build_sliding_eval_windows(total_target_tokens: int, seq_len: int, stride: int) -> list[tuple[int, int, int]]:
     if stride <= 0:
         raise ValueError(f"EVAL_STRIDE must be positive, got {stride}")
+    if stride > seq_len:
+        raise ValueError(
+            f"EVAL_STRIDE must be <= TRAIN_SEQ_LEN to avoid skipping validation targets; "
+            f"got EVAL_STRIDE={stride}, TRAIN_SEQ_LEN={seq_len}"
+        )
     if total_target_tokens <= 0:
         return []
     if total_target_tokens <= seq_len:

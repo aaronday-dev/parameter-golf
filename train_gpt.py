@@ -7,6 +7,7 @@ Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `t
 from __future__ import annotations
 
 import copy
+import fnmatch
 import glob
 import io
 import lzma
@@ -51,6 +52,8 @@ class Hyperparameters:
     val_max_batch_tokens = int(os.environ.get("VAL_MAX_BATCH_TOKENS", os.environ.get("VAL_BATCH_SIZE", 524_288)))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
+    eval_mode = os.environ.get("EVAL_MODE", "contiguous").strip().lower()
+    eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
 
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
@@ -284,6 +287,34 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     return tokens[: usable + 1]
 
 
+def build_sliding_eval_windows(total_target_tokens: int, seq_len: int, stride: int) -> list[tuple[int, int, int]]:
+    if stride <= 0:
+        raise ValueError(f"EVAL_STRIDE must be positive, got {stride}")
+    if total_target_tokens <= 0:
+        return []
+    if total_target_tokens <= seq_len:
+        return [(0, 0, total_target_tokens)]
+    starts = list(range(0, total_target_tokens - seq_len + 1, stride))
+    last_start = total_target_tokens - seq_len
+    if starts[-1] != last_start:
+        starts.append(last_start)
+    windows: list[tuple[int, int, int]] = []
+    next_unscored = 0
+    for start in starts:
+        window_end = min(start + seq_len, total_target_tokens)
+        score_start = max(next_unscored, start)
+        if score_start >= window_end:
+            continue
+        windows.append((start, score_start - start, window_end - start))
+        next_unscored = window_end
+    if next_unscored != total_target_tokens:
+        raise ValueError(
+            f"Sliding eval coverage mismatch: covered {next_unscored} of {total_target_tokens} tokens "
+            f"(seq_len={seq_len}, stride={stride})"
+        )
+    return windows
+
+
 def effective_val_batch_tokens(args: Hyperparameters, world_size: int) -> int:
     total_batch_seqs = args.val_max_batch_tokens // args.train_seq_len
     local_batch_seqs = total_batch_seqs // world_size
@@ -310,11 +341,11 @@ def eval_val(
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    eval_mode = args.eval_mode
+    if eval_mode not in {"contiguous", "sliding"}:
+        raise ValueError(f"EVAL_MODE must be 'contiguous' or 'sliding', got {eval_mode!r}")
     local_batch_tokens = effective_val_batch_tokens(args, world_size)
     local_batch_seqs = local_batch_tokens // args.train_seq_len
-    total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
-    seq_start = (total_seqs * rank) // world_size
-    seq_end = (total_seqs * (rank + 1)) // world_size
     accum_dtype = torch.float32 if device.type == "mps" else torch.float64
     val_loss_sum = torch.zeros((), device=device, dtype=accum_dtype)
     val_token_count = torch.zeros((), device=device, dtype=accum_dtype)
@@ -323,23 +354,48 @@ def eval_val(
     model.eval()
     autocast_enabled = device.type in {"cuda", "mps"}
     with torch.inference_mode():
-        for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
-            batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
-            raw_start = batch_seq_start * args.train_seq_len
-            raw_end = batch_seq_end * args.train_seq_len + 1
-            local = val_tokens[raw_start:raw_end].to(device=device, dtype=torch.int64, non_blocking=True)
-            x = local[:-1].reshape(-1, args.train_seq_len)
-            y = local[1:].reshape(-1, args.train_seq_len)
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
-                batch_loss = model(x, y).detach()
-            batch_token_count = float(y.numel())
-            val_loss_sum += batch_loss.to(accum_dtype) * batch_token_count
-            val_token_count += batch_token_count
-            prev_ids = x.reshape(-1)
-            tgt_ids = y.reshape(-1)
-            token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
-            token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
-            val_byte_count += token_bytes.to(accum_dtype).sum()
+        if eval_mode == "contiguous":
+            total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
+            seq_start = (total_seqs * rank) // world_size
+            seq_end = (total_seqs * (rank + 1)) // world_size
+            for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
+                batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
+                raw_start = batch_seq_start * args.train_seq_len
+                raw_end = batch_seq_end * args.train_seq_len + 1
+                local = val_tokens[raw_start:raw_end].to(device=device, dtype=torch.int64, non_blocking=True)
+                x = local[:-1].reshape(-1, args.train_seq_len)
+                y = local[1:].reshape(-1, args.train_seq_len)
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
+                    batch_loss = model(x, y).detach()
+                batch_token_count = float(y.numel())
+                val_loss_sum += batch_loss.to(accum_dtype) * batch_token_count
+                val_token_count += batch_token_count
+                prev_ids = x.reshape(-1)
+                tgt_ids = y.reshape(-1)
+                token_bytes = base_bytes_lut[tgt_ids].to(dtype=torch.int16)
+                token_bytes += (has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]).to(dtype=torch.int16)
+                val_byte_count += token_bytes.to(accum_dtype).sum()
+        else:
+            windows = build_sliding_eval_windows(val_tokens.numel() - 1, args.train_seq_len, args.eval_stride)
+            win_start = (len(windows) * rank) // world_size
+            win_end = (len(windows) * (rank + 1)) // world_size
+            positions = torch.arange(args.train_seq_len, device=device, dtype=torch.int64)[None, :]
+            for batch_window_start in range(win_start, win_end, local_batch_seqs):
+                batch_windows = windows[batch_window_start : min(batch_window_start + local_batch_seqs, win_end)]
+                x_cpu = torch.stack([val_tokens[start : start + args.train_seq_len] for start, _, _ in batch_windows], dim=0)
+                y_cpu = torch.stack([val_tokens[start + 1 : start + args.train_seq_len + 1] for start, _, _ in batch_windows], dim=0)
+                x = x_cpu.to(device=device, dtype=torch.int64, non_blocking=True)
+                y = y_cpu.to(device=device, dtype=torch.int64, non_blocking=True)
+                score_starts = torch.tensor([score_start for _, score_start, _ in batch_windows], device=device, dtype=torch.int64)
+                score_ends = torch.tensor([score_end for _, _, score_end in batch_windows], device=device, dtype=torch.int64)
+                score_mask = (positions >= score_starts[:, None]) & (positions < score_ends[:, None])
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
+                    token_losses = model.token_losses(x, y).detach()
+                val_loss_sum += token_losses.to(accum_dtype).masked_select(score_mask).sum()
+                val_token_count += score_mask.to(accum_dtype).sum()
+                token_bytes = base_bytes_lut[y].to(dtype=torch.int16)
+                token_bytes += (has_leading_space_lut[y] & ~is_boundary_token_lut[x]).to(dtype=torch.int16)
+                val_byte_count += token_bytes.to(accum_dtype).masked_select(score_mask).sum()
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(val_loss_sum, op=dist.ReduceOp.SUM)
@@ -383,6 +439,12 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 INT8_COMPRESSOR = os.environ.get("INT8_COMPRESSOR", "lzma").strip().lower()
 INT8_COMPRESSOR_EXT = {"zlib": ".ptz", "lzma": ".ptx"}
+INTX_BITS_BY_NAME = tuple(
+    (pattern.strip(), int(bits_text))
+    for item in os.environ.get("INTX_BITS_BY_NAME", "").split(",")
+    if item.strip()
+    for pattern, bits_text in [item.split(":", 1)]
+)
 
 
 def compress_quant_blob(raw: bytes) -> tuple[str, bytes]:
@@ -405,6 +467,51 @@ def decompress_quant_blob(blob: bytes) -> tuple[str, bytes]:
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
 
+
+def name_matches_pattern(name: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(name, pattern) if any(ch in pattern for ch in "*?[]") else pattern in name
+
+
+def quant_bits_for_name(name: str, overrides: tuple[tuple[str, int], ...] | None = None) -> int:
+    rules = INTX_BITS_BY_NAME if overrides is None else overrides
+    for pattern, bits in rules:
+        if name_matches_pattern(name, pattern):
+            if bits < 2 or bits > 8:
+                raise ValueError(f"quant bits must be in [2, 8], got {bits} for pattern {pattern!r}")
+            return bits
+    return 8
+
+
+def _pack_signed_codes(q: np.ndarray, bits: int) -> np.ndarray:
+    if bits == 8:
+        return np.ascontiguousarray(q.astype(np.int8, copy=False))
+    qmax = (1 << (bits - 1)) - 1
+    flat = np.asarray(q, dtype=np.int16).reshape(-1)
+    unsigned = np.asarray(flat + qmax, dtype=np.uint32)
+    offsets = np.arange(unsigned.size, dtype=np.uint64) * bits
+    total_bytes = (unsigned.size * bits + 7) // 8
+    packed = np.zeros((total_bytes,), dtype=np.uint8)
+    for shift in range(bits):
+        bit_values = ((unsigned >> shift) & 1).astype(np.uint8)
+        np.add.at(packed, (offsets + shift) // 8, bit_values << ((offsets + shift) % 8))
+    return np.ascontiguousarray(packed)
+
+
+def _unpack_signed_codes(packed: np.ndarray, shape: tuple[int, ...], bits: int) -> np.ndarray:
+    if bits == 8:
+        return np.ascontiguousarray(np.asarray(packed, dtype=np.int8).reshape(shape))
+    qmax = (1 << (bits - 1)) - 1
+    count = int(np.prod(shape))
+    offsets = np.arange(count, dtype=np.uint64) * bits
+    packed_u8 = np.asarray(packed, dtype=np.uint8).reshape(-1)
+    values = np.zeros((count,), dtype=np.uint32)
+    for shift in range(bits):
+        bit_values = ((packed_u8[(offsets + shift) // 8] >> ((offsets + shift) % 8)) & 1).astype(np.uint32)
+        values |= bit_values << shift
+    signed = values.astype(np.int16) - qmax
+    return np.ascontiguousarray(signed.astype(np.int8, copy=False).reshape(shape))
+
+
 def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
     if any(pattern in name for pattern in INT8_KEEP_FLOAT_FP32_NAME_PATTERNS):
         return t.float().contiguous()
@@ -413,8 +520,9 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
 
-def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+def quantize_float_tensor(t: Tensor, num_bits: int = 8) -> tuple[Tensor, Tensor]:
     t32 = t.float()
+    qmax = float((1 << (num_bits - 1)) - 1)
     if t32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
         # ranges much better than a single tensor-wide scale.
@@ -424,17 +532,20 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
             else torch.empty((t32.shape[0],), dtype=torch.float32)
         )
         clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+        scale = (clip_abs / qmax).clamp_min(1.0 / qmax)
+        q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
         return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
+    scale = torch.tensor(clip_abs / qmax if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -qmax, qmax).to(torch.int8).contiguous()
     return q, scale
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+    quant_bits_overrides: tuple[tuple[str, int], ...] | None = None,
+):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -472,13 +583,20 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
-        if s.ndim > 0:
-            qmeta[name] = {"scheme": "per_row", "axis": 0}
-        quantized[name] = q
+        num_bits = quant_bits_for_name(name, overrides=quant_bits_overrides)
+        q, s = quantize_float_tensor(t, num_bits=num_bits)
+        packed = torch.from_numpy(_pack_signed_codes(q.detach().cpu().numpy(), num_bits)).contiguous()
+        qmeta[name] = {
+            "scheme": "per_row" if s.ndim > 0 else "per_tensor",
+            "axis": 0 if s.ndim > 0 else None,
+            "bits": num_bits,
+            "shape": tuple(int(dim) for dim in q.shape),
+            "packed": num_bits < 8,
+        }
+        quantized[name] = packed
         scales[name] = s
         dtypes[name] = str(t.dtype).removeprefix("torch.")
-        stats["int8_payload_bytes"] += tensor_nbytes(q) + tensor_nbytes(s)
+        stats["int8_payload_bytes"] += tensor_nbytes(packed) + tensor_nbytes(s)
 
     obj: dict[str, object] = {
         "__quant_format__": "int8_clean_per_row_v1",
@@ -499,14 +617,19 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
     for name, q in obj["quantized"].items():
         dtype = getattr(torch, obj["dtypes"][name])
+        meta = qmeta.get(name, {})
+        num_bits = int(meta.get("bits", 8))
+        q_shape = tuple(int(dim) for dim in meta.get("shape", tuple(q.shape)))
+        q_np = _unpack_signed_codes(q.detach().cpu().numpy(), q_shape, num_bits)
+        q_t = torch.from_numpy(q_np)
         s = obj["scales"][name]
-        if qmeta.get(name, {}).get("scheme") == "per_row" or s.ndim > 0:
+        if meta.get("scheme") == "per_row" or s.ndim > 0:
             s = s.to(dtype=torch.float32)
             # Broadcast the saved row scale back across trailing dimensions.
-            out[name] = (q.float() * s.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype=dtype).contiguous()
+            out[name] = (q_t.float() * s.view(q_t.shape[0], *([1] * (q_t.ndim - 1)))).to(dtype=dtype).contiguous()
         else:
             scale = float(s.item())
-            out[name] = (q.float() * scale).to(dtype=dtype).contiguous()
+            out[name] = (q_t.float() * scale).to(dtype=dtype).contiguous()
     for name, t in obj["passthrough"].items():
         # Restore small tensors, undoing the temporary fp16 storage cast if needed.
         out_t = t.detach().to("cpu").contiguous()
@@ -1489,7 +1612,7 @@ class GPT(nn.Module):
         anchor = anchor + (x - anchor) / anchor_count
         return x, anchor, anchor_count, gate_metrics
 
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def hidden_states(self, input_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x0 = x
@@ -1537,7 +1660,11 @@ class GPT(nn.Module):
                 layer_delta_ready,
             )
 
-        x = self.final_norm(x).reshape(-1, x.size(-1))
+        return self.final_norm(x)
+
+    def token_losses(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        x = self.hidden_states(input_ids)
+        x = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
@@ -1546,7 +1673,10 @@ class GPT(nn.Module):
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-        return F.cross_entropy(logits.float(), targets, reduction="mean")
+        return F.cross_entropy(logits.float(), targets, reduction="none").reshape(target_ids.shape)
+
+    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+        return self.token_losses(input_ids, target_ids).mean()
 
 
 # -----------------------------
@@ -1663,7 +1793,10 @@ def main() -> None:
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
-    log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
+    log0(
+        f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path} "
+        f"eval_mode:{args.eval_mode} eval_stride:{args.eval_stride}"
+    )
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
 
@@ -1799,7 +1932,7 @@ def main() -> None:
         optimizers.insert(1, optimizer_head)
 
     n_params = sum(p.numel() for p in base_model.parameters())
-    log0(f"model_params:{n_params}")
+    log0(f"model_params:{n_params} seq_len:{args.train_seq_len}")
     layer_to_block = [base_model.block_index(i) for i in range(base_model.num_layers)]
     layer_is_revisit = [base_model.is_revisit_layer(i) for i in range(base_model.num_layers)]
     log0(
@@ -2055,6 +2188,10 @@ def main() -> None:
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
+        log0(
+            f"int8_serialization:compressor:{INT8_COMPRESSOR} "
+            f"quant_bits_by_name:{','.join(f'{pattern}:{bits}' for pattern, bits in INTX_BITS_BY_NAME) if INTX_BITS_BY_NAME else '-'}"
+        )
 
     quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
     quant_buf = io.BytesIO()

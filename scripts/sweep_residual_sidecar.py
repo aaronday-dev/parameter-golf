@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Offline sweep for a low-rank residual sidecar on one sacred tensor. "
             "Builds a normal int8 artifact, then restores part of the tensor-specific "
-            "quantization residual through a tiny fp16 low-rank carrier."
+            "quantization residual through a tiny low-rank carrier."
         )
     )
     parser.add_argument("--float-artifact", type=Path, default=DEFAULT_FLOAT_ARTIFACT)
@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         "--ranks",
         default="32,64,96,128,160,192,224",
         help="Comma-separated ranks to test.",
+    )
+    parser.add_argument(
+        "--sidecar-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+        help="Storage dtype for the residual sidecar factors.",
     )
     parser.add_argument("--vocab-size", type=int, default=1024)
     parser.add_argument("--num-layers", type=int, default=9)
@@ -221,12 +227,12 @@ def evaluate_state(
     )
 
 
-def trunc_svd_sidecar(residual: np.ndarray, rank: int) -> tuple[np.ndarray, np.ndarray]:
+def trunc_svd_sidecar(residual: np.ndarray, rank: int, factor_dtype: np.dtype) -> tuple[np.ndarray, np.ndarray]:
     u, s, vt = np.linalg.svd(residual, full_matrices=False)
     rank = min(rank, s.shape[0])
     root_s = np.sqrt(s[:rank], dtype=np.float32)
-    left = (u[:, :rank] * root_s[None, :]).astype(np.float16, copy=False)
-    right = (root_s[:, None] * vt[:rank, :]).astype(np.float16, copy=False)
+    left = (u[:, :rank] * root_s[None, :]).astype(factor_dtype, copy=False)
+    right = (root_s[:, None] * vt[:rank, :]).astype(factor_dtype, copy=False)
     return np.ascontiguousarray(left), np.ascontiguousarray(right)
 
 
@@ -305,6 +311,7 @@ def compress_bytes(quant_obj: dict[str, object]) -> int:
 def main() -> None:
     ns = parse_args()
     ranks = parse_ranks(ns.ranks)
+    factor_dtype = np.float16 if ns.sidecar_dtype == "float16" else np.float32
     args = make_runtime_args(ns)
     float_state_np = load_float_state(ns.float_artifact)
 
@@ -386,7 +393,7 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     for rank in ranks:
         print(f"Testing residual rank {rank}")
-        left, right = trunc_svd_sidecar(residual, rank)
+        left, right = trunc_svd_sidecar(residual, rank, factor_dtype)
         quant_obj, stats = build_quant_obj(
             float_flat,
             ns.target_tensor,
@@ -417,6 +424,7 @@ def main() -> None:
             "bpb_delta_vs_keepf": None if keepf_bpb is None else val_bpb - keepf_bpb,
             "bpb_delta_vs_plain": None if plain_bpb is None else val_bpb - plain_bpb,
             "sidecar_raw_bytes": int(left.nbytes + right.nbytes),
+            "sidecar_dtype": ns.sidecar_dtype,
             "payload_bytes": stats["int8_payload_bytes"],
         }
         rows.append(row)
@@ -455,6 +463,7 @@ def main() -> None:
             "payload_bytes": plain_stats["int8_payload_bytes"],
         },
         "target_tensor": ns.target_tensor,
+        "sidecar_dtype": ns.sidecar_dtype,
         "residual_relative_norm": residual_norm / max(weight_norm, 1e-12),
         "rows": rows,
     }

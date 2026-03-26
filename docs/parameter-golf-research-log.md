@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-25
+Last updated: 2026-03-26
 
 ## Purpose
 
@@ -2285,3 +2285,44 @@ Dead or inactive branches:
 - row-subset rescue
 - fp32 sidecar retry
 - naive tiled or mixed local residual retry
+
+## 2026-03-26 - scout attempted the full fp32-factor residual-sidecar promotion but MLX is unavailable here
+
+During the `Golf Scout` automation run at `2026-03-26T19:30:10Z`, the explicit queue item from the automation prompt was:
+
+- run the full fp32-factor residual-sidecar sweep for ranks `32,48,64`
+
+This remained incomplete in one important sense:
+
+- the repo already had the bounded `128`-sequence fp32-factor ranking sweep
+- but it did not have the promoted full-validation JSON for the same ranks
+
+To make that promotion reproducible again, `scripts/sweep_residual_sidecar.py` was updated to restore an explicit:
+
+- `--sidecar-dtype {float16,float32}`
+
+and to record the chosen sidecar dtype in the output JSON payload.
+
+Intended promotion command:
+
+- `.venv/bin/python scripts/sweep_residual_sidecar.py --sidecar-dtype float32 --ranks 32,48,64 --val-seqs 60568 --output-json results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json`
+
+Observed blocker:
+
+- even the narrower probe
+  - `.venv/bin/python -c 'import mlx.core as mx; print(mx.default_device())'`
+  aborts immediately in this automation context
+- the failure is an `NSRangeException` inside MLX Metal device initialization
+- it happens before argument parsing or any evaluation work
+
+So the honest outcome of this run is:
+
+- no full-validation fp32-factor JSON was produced
+- no new quality conclusion was earned
+- the blocker is execution environment, not an unresolved repo bug in the sweep logic itself
+
+Current recommendation:
+
+- treat the full fp32-factor promotion as still pending
+- run it only from a Metal-capable local session where `import mlx.core` succeeds
+- keep the next queued task unchanged until that exact run actually lands

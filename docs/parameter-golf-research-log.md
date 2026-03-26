@@ -2243,3 +2243,45 @@ Read:
 - the package still points at the same CUDA training hypothesis:
   - use mixed-bit compression headroom to fund extra capacity, not to claim an immediate export-only win
 - there are no remaining incomplete items in this bounded scout queue after the handoff refresh
+
+## 2026-03-26 - borrowed compute path marked inactive; switch to strict local-only queue
+
+The borrowed-`5090` path is no longer an active planning item.
+
+Reason:
+
+- the operator path failed, not the handoff artifact
+- the handoff package existed and was refreshed
+- but the real bottleneck became human coordination and CLI friction
+- that is negative expected value compared with continuing bounded local work
+
+So the planning boundary is now:
+
+- no friend-mediated compute
+- no handoff maintenance as an active queue item
+- no external operator assumptions in the main search loop
+
+Updated read:
+
+- the laptop is not the right machine for a stacked public leaderboard push by itself
+- but it is still the right machine for falsification, artifact sweeps, and tooling
+- the search should stay local-only until compute is directly controlled by the repo owner
+
+The new active queue is captured in:
+
+- `docs/local-only-active-queue.md`
+
+Top local-only priorities:
+
+1. tighten the mixed-bit quality/bytes knee around `mlp6_attn6`
+2. build a capacity budget table for larger candidate architectures instead of guessing
+3. keep sliding eval as a separate parity metric, not a new source of multi-hour laptop runs
+
+Dead or inactive branches:
+
+- friend / borrowed-`5090` handoff
+- bigram-hash retry
+- soft-floor retry
+- row-subset rescue
+- fp32 sidecar retry
+- naive tiled or mixed local residual retry

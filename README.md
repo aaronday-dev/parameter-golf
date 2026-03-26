@@ -137,6 +137,7 @@ The main running log lives in:
 
 - `docs/parameter-golf-research-log.md`
 - `docs/parameter-golf-hypothesis-worksheet.md`
+- `docs/local-only-active-queue.md`
 
 Current practical takeaway:
 
@@ -146,3 +147,5 @@ Current practical takeaway:
    recent gains.
 4. The best local result currently comes from a plain higher-capacity sequential
    model that still fits under the `16 MB` artifact cap.
+5. Active planning is currently strict local-only; borrowed-compute handoffs are
+   inactive until compute is directly controllable.

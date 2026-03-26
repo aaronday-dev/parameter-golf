@@ -1,0 +1,90 @@
+{
+  "source_float_run_id": "mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2",
+  "calibration_center_bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+  "compare_capped_bpb": 2.35570158,
+  "compare_capped_artifact_bytes": 15109864,
+  "baseline_8bit": {
+    "artifact_bytes": 14813668,
+    "val_bpb": 2.355862958237435,
+    "payload_bytes": 26634528
+  },
+  "summary": {
+    "profile_count": 5,
+    "best_bpb_label": "mlp6_attn6",
+    "best_bpb": 2.364808808986397,
+    "smallest_artifact_label": "mlp4_attn6",
+    "smallest_artifact_bytes": 4421084
+  },
+  "rows": [
+    {
+      "label": "mlp4_attn6",
+      "bits_profile": "*.mlp.fc.weight:4,*.mlp.proj.weight:4,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+      "mlp_bits": 4,
+      "attn_bits": 6,
+      "artifact_bytes": 4421084,
+      "artifact_delta_vs_8bit": -10392584,
+      "artifact_delta_vs_capped_leader": -10688780,
+      "bytes_over_cap": -11578916,
+      "val_bpb": 2.630174517552971,
+      "bpb_delta_vs_8bit": 0.2743115593155361,
+      "bpb_delta_vs_capped_leader": 0.2744729375529711,
+      "payload_bytes": 15427872
+    },
+    {
+      "label": "mlp5_attn5",
+      "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:5,*.attn.c_k.weight:5,*.attn.c_v.weight:5,*.attn.proj.weight:5",
+      "mlp_bits": 5,
+      "attn_bits": 5,
+      "artifact_bytes": 6196420,
+      "artifact_delta_vs_8bit": -8617248,
+      "artifact_delta_vs_capped_leader": -8913444,
+      "bytes_over_cap": -9803580,
+      "val_bpb": 2.397916167362657,
+      "bpb_delta_vs_8bit": 0.042053209125222146,
+      "bpb_delta_vs_capped_leader": 0.04221458736265715,
+      "payload_bytes": 16902432
+    },
+    {
+      "label": "mlp5_attn6",
+      "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+      "mlp_bits": 5,
+      "attn_bits": 6,
+      "artifact_bytes": 7244516,
+      "artifact_delta_vs_8bit": -7569152,
+      "artifact_delta_vs_capped_leader": -7865348,
+      "bytes_over_cap": -8755484,
+      "val_bpb": 2.386233089440687,
+      "bpb_delta_vs_8bit": 0.03037013120325227,
+      "bpb_delta_vs_capped_leader": 0.030531509440687277,
+      "payload_bytes": 17787168
+    },
+    {
+      "label": "mlp5_attn7",
+      "bits_profile": "*.mlp.fc.weight:5,*.mlp.proj.weight:5,*.attn.c_q.weight:7,*.attn.c_k.weight:7,*.attn.c_v.weight:7,*.attn.proj.weight:7",
+      "mlp_bits": 5,
+      "attn_bits": 7,
+      "artifact_bytes": 8527564,
+      "artifact_delta_vs_8bit": -6286104,
+      "artifact_delta_vs_capped_leader": -6582300,
+      "bytes_over_cap": -7472436,
+      "val_bpb": 2.3837106068321563,
+      "bpb_delta_vs_8bit": 0.02784764859472144,
+      "bpb_delta_vs_capped_leader": 0.028009026832156447,
+      "payload_bytes": 18671904
+    },
+    {
+      "label": "mlp6_attn6",
+      "bits_profile": "*.mlp.fc.weight:6,*.mlp.proj.weight:6,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6",
+      "mlp_bits": 6,
+      "attn_bits": 6,
+      "artifact_bytes": 9521536,
+      "artifact_delta_vs_8bit": -5292132,
+      "artifact_delta_vs_capped_leader": -5588328,
+      "bytes_over_cap": -6478464,
+      "val_bpb": 2.364808808986397,
+      "bpb_delta_vs_8bit": 0.008945850748962147,
+      "bpb_delta_vs_capped_leader": 0.009107228986397153,
+      "payload_bytes": 20146464
+    }
+  ]
+}

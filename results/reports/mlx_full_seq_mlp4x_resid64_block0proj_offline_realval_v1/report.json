@@ -4,14 +4,14 @@
   "subtitle": "Normalized offline artifact-eval view for a derived capped result.",
   "run": {
     "run_id": "mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1",
-    "source_log": "/Users/aaronday/dev/parameter-golf/results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt",
+    "source_log": "results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt",
     "train_loader_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_train_*.bin",
     "val_loader_pattern": "./data/datasets/fineweb10B_sp1024/fineweb_val_*.bin",
     "tokenizer_path": "./data/tokenizers/fineweb_1024_bpe.model",
     "source_kind": "offline_artifact_eval",
-    "source_training_log": "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2.txt",
-    "source_result_json": "/Users/aaronday/dev/parameter-golf/results/residual_sidecar_rank64_fullval.json",
-    "source_float_artifact": "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz"
+    "source_training_run_id": "mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2",
+    "source_result_json": "results/residual_sidecar_rank64_fullval.json",
+    "source_float_run_id": "mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2"
   },
   "model": {
     "params": 26497096,
@@ -145,10 +145,9 @@
     "This is a full-eval result over 62,021,632 validation tokens."
   ],
   "source_artifacts": [
-    "/Users/aaronday/dev/parameter-golf/results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt",
-    "/Users/aaronday/dev/parameter-golf/results/residual_sidecar_rank64_fullval.json",
-    "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2.txt",
-    "/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz"
+    "results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt",
+    "results/residual_sidecar_rank64_fullval.json",
+    "source_run_id:mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2"
   ],
   "experiment": {
     "result_type": "offline_artifact_eval",

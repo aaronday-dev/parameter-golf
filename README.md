@@ -1,55 +1,61 @@
 # Parameter Golf
 
-This repository contains a standalone Parameter Golf workspace built from the
-local experiment branch.
+This repository is a standalone Parameter Golf workspace focused on artifact-aware compression and evaluation under the `16,000,000` byte cap.
 
-The main focus is simple:
+The main goals are:
 
 - train small language models under the challenge constraints
 - measure exact post-quantization `val_bpb`
-- compare architectural changes against compressed artifact size
-- keep the search legible through logs and notes
+- compare model quality against compressed artifact size
+- keep the search legible through targeted tooling and result summaries
 
-## Current Best Verified Local Result
+## Current Best Capped Result
 
-Best exact real-data result currently in this repo:
+- Run: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- Exact `val_bpb`: `2.35570158`
+- Compressed artifact size: `15,109,864` bytes
+- Method: offline rank-64 residual sidecar on a quantization-sensitive early MLP projection tensor, `blocks.0.mlp.proj.weight`
 
-- run: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
-- exact `val_bpb = 2.35570158`
-- compressed artifact size: `15,109,864` bytes via `lzma` from an offline rank-64 residual sidecar on `blocks.0.mlp.proj.weight`
-- hardware: Apple Silicon M4 via MLX / Metal
+This result is documented in:
 
-Earlier milestones:
+- `docs/public-summary.md`
+- `results/reports/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1/report.md`
+- `results/residual_sidecar_rank64_fullval.json`
 
-- plain sequential `MLP_MULT=3`:
-  `2.37334218`
-- shared-core mirror + directional correction + `MLP_MULT=3`:
-  `2.38131855`
-- shared-core mirror + directional correction:
-  `2.38989686`
+## Mixed-Precision Calibration
 
-Current local conclusion:
+The current calibrated mixed-precision branch is `mlp6_attn6`.
 
-- increasing useful capacity helped
-- extra recurrence and contraction-style controls mostly did not
-- moving the plain sequential winner from `MLP_MULT=3` to `MLP_MULT=4` produced the latest real-data gain
-- artifact compression now defaults to `lzma`, while old `zlib` artifacts remain readable
-- the current capped local leader is no longer a plain retrain; it is an offline derived carrier that preserves most of the sacred-tensor gain under the byte cap
+- `mlp5_attn6`: `2.38623309` at `7,244,516` bytes
+- `mlp5_attn7`: `2.38371061` at `8,527,564` bytes
+- `mlp6_attn6`: `2.36480881` at `9,521,536` bytes
 
-## What This Repo Contains
+The calibration evidence lives in:
+
+- `results/mixed_precision_quant_calibration_fullval.json`
+
+## Why This Matters
+
+The repo’s main finding is not a new architecture family. It is that exact artifact-aware evaluation changes which ideas survive:
+
+- generic quantization is not uniformly good
+- an early MLP projection tensor is unusually sensitive
+- calibrated mixed precision creates a plausible compression-funded capacity branch
+
+The next compute-backed question is:
+
+- can `mlp6_attn6` fund a larger `10L` or `11L` `MLP3x` retrain that beats `2.35570158` under exact roundtrip evaluation?
+
+## Key Code Paths
 
 - `train_gpt.py`
-  Torch/CUDA trainer.
+  Torch/CUDA trainer with sliding-eval and mixed-bit quantization support.
 - `train_gpt_mlx.py`
-  Apple Silicon / MLX trainer used for local search.
-- `scripts/`
-  Run wrappers and small analysis helpers.
-- `docs/`
-  Research log, run notes, and archived upstream challenge material.
-- `results/`
-  Selected run logs.
-- `data/README.md`
-  Expected local dataset/tokenizer layout.
+  Apple Silicon / MLX trainer used for the local artifact-aware search loop.
+- `scripts/sweep_mixed_precision_quant.py`
+  Offline mixed-precision artifact sweep.
+- `scripts/sweep_mixed_precision_quant_calibration.py`
+  Mixed-precision calibration sweep centered on the current best export profile.
 
 ## Quick Start
 
@@ -61,37 +67,15 @@ python3 -m venv .venv
 .venv/bin/pip install mlx
 ```
 
-Download the smoke tokenizer and dataset prefix used by the local MLX wrappers:
+Bootstrap the smoke tokenizer and dataset prefix used by the local MLX wrappers:
 
 ```bash
 .venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1 --build-smoke
 ```
 
-Then place any larger dataset prefixes under `./data/` using the layout in:
+Place larger dataset prefixes under `./data/` using:
 
 - `data/README.md`
-
-To archive a finished run log into `results/` and update the current-best docs when
-appropriate:
-
-```bash
-python3 scripts/archive_parameter_golf_run.py RUN_ID
-```
-
-To archive an offline derived artifact result into the same `results/` / `results/reports/`
-shape:
-
-```bash
-python3 scripts/archive_parameter_golf_offline_result.py RUN_ID ...
-```
-
-To render a normalized report for a single archived run:
-
-```bash
-python3 scripts/render_parameter_golf_run_report.py \
-  --log results/mlx_full_seq_mlp4x_200_realval_vb524k.txt \
-  --output-dir /tmp/parameter-golf-report
-```
 
 For Apple Silicon MLX runs:
 
@@ -105,44 +89,10 @@ For smoke mode:
 RUN_MODE=smoke scripts/run_parameter_golf_mlx_m4.sh
 ```
 
-For the longer local promotion profile:
+## Additional Context
 
-```bash
-RUN_MODE=promotion scripts/run_parameter_golf_mlx_m4.sh
-```
-
-## Included Experimental Highlights
-
-- `results/mlx_full_mirror_dirc02_200_realval.txt`
-  Early shared-core promoted winner.
-- `results/mlx_full_mirror_mlp3x_dirc02_200_realval_vb524k.txt`
-  Shared-core `MLP_MULT=3` promoted result.
-- `results/mlx_full_seq_mlp3x_200_realval_vb524k.txt`
-  Current best local promoted result.
-- `results/mlx_mirror13_dirc02_cmp.txt`
-  Negative result: more mirrored recurrence alone regressed.
-
-## Data
-
-Datasets are not vendored here, but the standalone repo now includes a small
-published-data bootstrap helper for the local MLX path:
-
-- `data/cached_challenge_fineweb.py`
-- `data/README.md`
-- `docs/upstream-openai-readme.md`
-
-## Research Thread
-
-The main running log lives in:
+Supporting historical notes remain in:
 
 - `docs/parameter-golf-research-log.md`
-- `docs/parameter-golf-hypothesis-worksheet.md`
 
-Current practical takeaway:
-
-1. Shared-core mirror scheduling produced a measurable improvement over the earlier baseline.
-2. Blunt contraction / damping / attractor-style controls mostly failed.
-3. Spending more of the artifact budget on useful capacity produced the biggest
-   recent gains.
-4. The best local result currently comes from a plain higher-capacity sequential
-   model that still fits under the `16 MB` artifact cap.
+That log is intentionally secondary. The public summary and linked result artifacts above are the primary entry points for this branch.

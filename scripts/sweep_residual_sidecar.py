@@ -28,7 +28,7 @@ ARTIFACT_BUDGET_BYTES = 16_000_000
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Offline sweep for a low-rank residual sidecar on one sacred tensor. "
+            "Offline sweep for a low-rank residual sidecar on one quantization-sensitive tensor. "
             "Builds a normal int8 artifact, then restores part of the tensor-specific "
             "quantization residual through a tiny fp16 low-rank carrier."
         )
@@ -191,6 +191,7 @@ def typed_state_from_npz(model: pg.GPT, float_state_np: dict[str, np.ndarray]) -
 def evaluate_state(
     model: pg.GPT,
     compiled_loss,
+    compiled_token_losses,
     state_flat: dict[str, pg.mx.array],
     args: pg.Hyperparameters,
     val_tokens: np.ndarray,
@@ -212,6 +213,7 @@ def evaluate_state(
         base_bytes_lut,
         has_leading_space_lut,
         is_boundary_token_lut,
+        compiled_token_losses=compiled_token_losses,
         log_fn=log_fn,
     )
 
@@ -320,6 +322,7 @@ def main() -> None:
     if ns.target_tensor not in float_flat:
         raise ValueError(f"missing target tensor {ns.target_tensor!r}")
     compiled_loss = pg.mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_token_losses = pg.mx.compile(lambda x, y: model.token_losses(x, y), inputs=model.state, outputs=model.state)
 
     keepf_artifact_bytes: int | None = None
     keepf_bpb: float | None = None
@@ -331,6 +334,7 @@ def main() -> None:
         _, keepf_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             keepf_flat,
             args,
             val_tokens,
@@ -350,6 +354,7 @@ def main() -> None:
         _, plain_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             plain_flat,
             args,
             val_tokens,
@@ -390,6 +395,7 @@ def main() -> None:
         _, val_bpb = evaluate_state(
             model,
             compiled_loss,
+            compiled_token_losses,
             quant_flat,
             args,
             val_tokens,

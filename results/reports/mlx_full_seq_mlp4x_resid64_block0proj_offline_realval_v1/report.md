@@ -12,7 +12,7 @@ Normalized offline artifact-eval view for a derived capped result.
 
 ## Run
 - Run id: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
-- Source log: `/Users/aaronday/dev/parameter-golf/results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt`
+- Source result note: `results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt`
 - Validation tokens: `62,021,632`
 - Eval scope: `full`
 
@@ -59,7 +59,6 @@ Normalized offline artifact-eval view for a derived capped result.
 - Savings vs saved model: `84.505`%
 
 ## Source Artifacts
-- `/Users/aaronday/dev/parameter-golf/results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt`
-- `/Users/aaronday/dev/parameter-golf/results/residual_sidecar_rank64_fullval.json`
-- `/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2.txt`
-- `/Users/aaronday/dev/parameter-golf/logs/mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2_mlx_model.npz`
+- `results/mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1.txt`
+- `results/residual_sidecar_rank64_fullval.json`
+- source run id: `mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2`

@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Offline exact-eval calibration sweep around the current mixed-bit 5/6 profile on the "
-            "promoted sacred-tensor float artifact. Evaluates a bounded neighborhood of nearby profiles "
-            "against one shared 8-bit baseline."
+            "promoted float artifact used for the capped-leader comparison. Evaluates a bounded "
+            "neighborhood of nearby profiles against one shared 8-bit baseline."
         )
     )
     parser.add_argument("--float-artifact", type=Path, default=DEFAULT_FLOAT_ARTIFACT)

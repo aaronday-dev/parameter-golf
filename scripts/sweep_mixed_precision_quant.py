@@ -42,8 +42,9 @@ CURRENT_CAPPED_ARTIFACT_BYTES = 15_109_864
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Offline exact-eval sweep for a mixed-bit quantization profile on the promoted sacred-tensor float artifact. "
-            "Compares the stock 8-bit export path against one lower-bit per-name-pattern profile."
+            "Offline exact-eval sweep for a mixed-bit quantization profile on the promoted float artifact "
+            "used for the current capped-leader comparison. Compares the stock 8-bit export path against "
+            "one lower-bit per-name-pattern profile."
         )
     )
     parser.add_argument("--float-artifact", type=Path, default=DEFAULT_FLOAT_ARTIFACT)

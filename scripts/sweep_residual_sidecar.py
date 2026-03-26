@@ -28,7 +28,7 @@ ARTIFACT_BUDGET_BYTES = 16_000_000
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Offline sweep for a low-rank residual sidecar on one sacred tensor. "
+            "Offline sweep for a low-rank residual sidecar on one quantization-sensitive tensor. "
             "Builds a normal int8 artifact, then restores part of the tensor-specific "
             "quantization residual through a tiny fp16 low-rank carrier."
         )

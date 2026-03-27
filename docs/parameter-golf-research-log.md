@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-26
+Last updated: 2026-03-27
 
 ## Purpose
 
@@ -2326,3 +2326,40 @@ Current recommendation:
 - treat the full fp32-factor promotion as still pending
 - run it only from a Metal-capable local session where `import mlx.core` succeeds
 - keep the next queued task unchanged until that exact run actually lands
+
+## 2026-03-27 - scout rechecked the fp32-factor queue head and the MLX blocker still holds
+
+During the `Golf Scout` automation run at `2026-03-27T07:42:36Z`, the repo was first checked for two automation guardrails:
+
+- no long-running parameter-golf experiment was active
+- the git worktree was clean on `codex/scout-loop`
+
+So the scout took the first incomplete automation queue item again:
+
+- run the fp32-factor residual-sidecar full-validation sweep for ranks `32,48,64`
+
+The intended command is still:
+
+- `.venv/bin/python scripts/sweep_residual_sidecar.py --sidecar-dtype float32 --ranks 32,48,64 --val-seqs 60568 --output-json results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json`
+
+But before starting a multi-hour eval, the narrow environment probe was repeated in the repo venv:
+
+- `.venv/bin/python -c 'import mlx.core as mx; print(mx.default_device())'`
+
+Observed result:
+
+- the process still aborts immediately with the same `NSRangeException`
+- the crash still occurs inside MLX Metal device initialization
+- the failure still happens before any sweep argument parsing or evaluation work
+
+So the honest outcome of this automation cycle is unchanged:
+
+- no new JSON result was produced under `results/`
+- no new quality or bytes conclusion was earned
+- the blocker is still the local execution environment, not the sweep script contract
+
+Current recommendation:
+
+- keep the fp32-factor full-validation sweep as the next queued automation task
+- only reattempt it from a session where the repo venv can successfully import `mlx.core`
+- do not advance to the mixed-bit recalibration or handoff-refresh queue items until this head task either lands or is explicitly deprioritized

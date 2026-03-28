@@ -1,6 +1,6 @@
 # Parameter Golf Research Log
 
-Last updated: 2026-03-27
+Last updated: 2026-03-28
 
 ## Purpose
 
@@ -2398,4 +2398,41 @@ So the honest outcome of this automation cycle is still:
 Current recommendation:
 
 - keep the fp32-factor full-validation sweep as the next queued automation task
+- do not advance to the mixed-bit recalibration or handoff refresh until this queue head lands or is explicitly deprioritized
+
+## 2026-03-28 - scout revalidated the fp32 queue head and the MLX import crash still blocks promotion
+
+During the `Golf Scout` automation run at `2026-03-28T13:28:27Z`, the target repo in `/Users/aaronday/dev/parameter-golf` was checked again for the scout guardrails:
+
+- no long-running parameter-golf experiment was active
+- the git worktree was clean on `codex/scout-loop`
+
+So the scout took the first incomplete queue item again:
+
+- run the fp32-factor residual-sidecar full-validation sweep for ranks `32,48,64`
+
+The intended promotion command is still:
+
+- `.venv/bin/python scripts/sweep_residual_sidecar.py --sidecar-dtype float32 --ranks 32,48,64 --val-seqs 60568 --output-json results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json`
+
+Before starting another multi-hour eval, the narrow repo-venv probe was rerun:
+
+- `.venv/bin/python -c 'import mlx.core as mx; print(mx.default_device())'`
+
+Observed result:
+
+- the process still aborts immediately with `NSRangeException`
+- the stack still terminates inside MLX Metal device initialization
+- the crash still happens during `mlx.core` import, before sweep argument parsing or any evaluation work
+
+So the honest outcome of this automation cycle is still:
+
+- no new JSON result was produced under `results/`
+- no new quality or bytes conclusion was earned
+- the blocker is still the local MLX execution environment, not a new sweep-script defect
+
+Current recommendation:
+
+- keep the fp32-factor full-validation sweep as the next queued automation task
+- only reattempt it from a session where the repo venv can successfully import `mlx.core`
 - do not advance to the mixed-bit recalibration or handoff refresh until this queue head lands or is explicitly deprioritized

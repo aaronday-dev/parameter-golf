@@ -2473,3 +2473,39 @@ Current recommendation:
 - keep the fp32-factor full-validation sweep as the next queued automation task
 - only reattempt it from a session where the repo venv can successfully import `mlx.core`
 - do not advance to the mixed-bit recalibration or handoff refresh until this queue head lands or is explicitly deprioritized
+
+## 2026-03-29 - scout monitored an already-running fp32 queue-head sweep instead of duplicating it
+
+During the `Golf Scout` automation run at `2026-03-29T10:38:46Z`, the target repo in `/Users/aaronday/dev/parameter-golf` was checked again for the scout guardrails:
+
+- the git worktree was clean on `codex/scout-loop`
+- a long-running parameter-golf experiment was already active, so the scout did not start a duplicate run
+
+The live process matched queue item `1` exactly:
+
+- pid `21574`
+- command:
+  - `.venv/bin/python scripts/sweep_residual_sidecar.py --sidecar-dtype float32 --ranks 32,48,64 --val-seqs 60568 --output-json results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json`
+
+Bounded monitor probes showed:
+
+- first probe: elapsed `03:17`, state `Ss+`, `%cpu 1.7`
+- second probe about `35s` later: elapsed `04:12`, state `Ss+`, `%cpu 44.7`, cpu time `0:29.81`
+- the process had MLX Metal libraries open via `lsof`, which is consistent with active local eval work rather than an immediate import crash in this session
+- `results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json` did not exist yet during either probe
+
+The sweep script contract matters here:
+
+- it prints intermediate progress to its controlling TTY
+- it writes the requested JSON only at the very end, after keep-float, plain-quant, and all requested ranks finish
+
+So the honest outcome of this automation cycle is:
+
+- no new JSON result was produced during this scout run
+- no new frontier conclusion was earned yet
+- the correct action was to monitor and leave the active queue-head sweep alone
+
+Current recommendation:
+
+- keep queue item `1` as the next queued task until the active process either writes `results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json` or exits
+- do not advance to the mixed-bit recalibration or the `5090` handoff refresh while this queue-head run is still in flight

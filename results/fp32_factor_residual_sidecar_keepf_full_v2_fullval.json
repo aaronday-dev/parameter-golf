@@ -1,0 +1,56 @@
+{
+  "keep_float": {
+    "artifact_bytes": 16263292,
+    "val_bpb": 2.355511933830118,
+    "payload_bytes": 27682080
+  },
+  "plain_quant": {
+    "artifact_bytes": 14813572,
+    "val_bpb": 2.355862958237435,
+    "payload_bytes": 26634528
+  },
+  "target_tensor": "blocks.0.mlp.proj.weight",
+  "sidecar_dtype": "float32",
+  "residual_relative_norm": 0.09418993676386687,
+  "rows": [
+    {
+      "rank": 32,
+      "artifact_bytes": 15116588,
+      "artifact_delta_vs_keepf": -1146704,
+      "artifact_delta_vs_plain": 303016,
+      "bytes_over_cap": -883412,
+      "val_bpb": 2.3557230792080257,
+      "bpb_delta_vs_keepf": 0.0002111453779076733,
+      "bpb_delta_vs_plain": -0.0001398790294091512,
+      "sidecar_raw_bytes": 327680,
+      "sidecar_dtype": "float32",
+      "payload_bytes": 26962208
+    },
+    {
+      "rank": 48,
+      "artifact_bytes": 15268148,
+      "artifact_delta_vs_keepf": -995144,
+      "artifact_delta_vs_plain": 454576,
+      "bytes_over_cap": -731852,
+      "val_bpb": 2.355712003602774,
+      "bpb_delta_vs_keepf": 0.00020006977265607517,
+      "bpb_delta_vs_plain": -0.00015095463466074932,
+      "sidecar_raw_bytes": 491520,
+      "sidecar_dtype": "float32",
+      "payload_bytes": 27126048
+    },
+    {
+      "rank": 64,
+      "artifact_bytes": 15419224,
+      "artifact_delta_vs_keepf": -844068,
+      "artifact_delta_vs_plain": 605652,
+      "bytes_over_cap": -580776,
+      "val_bpb": 2.3557002393741224,
+      "bpb_delta_vs_keepf": 0.0001883055440043968,
+      "bpb_delta_vs_plain": -0.00016271886331242769,
+      "sidecar_raw_bytes": 655360,
+      "sidecar_dtype": "float32",
+      "payload_bytes": 27289888
+    }
+  ]
+}

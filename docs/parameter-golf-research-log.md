@@ -2509,3 +2509,82 @@ Current recommendation:
 
 - keep queue item `1` as the next queued task until the active process either writes `results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json` or exits
 - do not advance to the mixed-bit recalibration or the `5090` handoff refresh while this queue-head run is still in flight
+
+## 2026-03-29 - scout completed the fp32-factor residual-sidecar full-validation sweep
+
+During the `Golf Scout` automation run on `2026-03-29`, the target repo in `/Users/aaronday/dev/parameter-golf` was checked again for the scout guardrails:
+
+- no active long-running experiment was evident from repo-state checks
+- the git worktree was clean on `codex/scout-loop`
+
+The old MLX gate that had blocked this queue head in earlier automation sessions was then re-probed:
+
+- `.venv/bin/python -c 'import mlx.core as mx; print(mx.default_device())'`
+- result:
+  - `Device(gpu, 0)`
+
+So the scout completed the first incomplete queue item:
+
+- run the fp32-factor residual-sidecar full-validation sweep for ranks `32,48,64`
+
+Executed command:
+
+- `.venv/bin/python scripts/sweep_residual_sidecar.py --sidecar-dtype float32 --ranks 32,48,64 --val-seqs 60568 --output-json results/fp32_factor_residual_sidecar_keepf_full_v2_fullval.json`
+
+Reference points on the full published validation prefix:
+
+- keep-float sacred tensor:
+  - artifact `16,263,292`
+  - `val_bpb = 2.35551193`
+- plain quant baseline:
+  - artifact `14,813,572`
+  - `val_bpb = 2.35586296`
+  - gap vs keep-float:
+    - `+0.00035102 bpb`
+
+fp32-factor full-validation results:
+
+- rank `32`:
+  - artifact `15,116,588`
+  - `val_bpb = 2.35572308`
+  - delta vs plain quant:
+    - `-0.00013988 bpb`
+    - `+303,016` bytes
+  - gap recovered vs plain:
+    - about `39.85%`
+- rank `48`:
+  - artifact `15,268,148`
+  - `val_bpb = 2.35571200`
+  - delta vs plain quant:
+    - `-0.00015095 bpb`
+    - `+454,576` bytes
+  - gap recovered vs plain:
+    - about `43.00%`
+- rank `64`:
+  - artifact `15,419,224`
+  - `val_bpb = 2.35570024`
+  - delta vs plain quant:
+    - `-0.00016272 bpb`
+    - `+605,652` bytes
+  - gap recovered vs plain:
+    - about `46.36%`
+
+Read:
+
+- all tested fp32-factor variants stay under the `16,000,000` byte cap
+- rank `64` is still the best quality point in this bounded fp32 family
+- but the earlier fp16 rank-64 residual-sidecar leader is still the better capped frontier point:
+  - fp16 rank `64`: artifact `15,109,864`, `val_bpb = 2.35570158`
+  - fp32 rank `64`: artifact `15,419,224`, `val_bpb = 2.35570024`
+  - full-validation fp32 buys only about `-0.00000134 bpb` for `+309,360` bytes
+- this confirms the earlier `128`-sequence proxy read:
+  - fp32 factors are a real quality nudge
+  - but not a materially better frontier than the cheaper fp16 carrier
+- these results do not change the mixed-bit recommendation or justify another `5090` handoff refresh
+
+Updated recommendation:
+
+- keep the fp16 rank-64 residual sidecar as the live capped leader in this family
+- treat the fp32-factor full-validation sweep as complete
+- do not refresh the `5090` handoff package from this result
+- there are no remaining incomplete items in this bounded scout queue unless the queue is reset or reprioritized

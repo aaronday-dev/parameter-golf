@@ -2619,3 +2619,55 @@ Current recommendation:
 
 - treat this run as a bounded no-op queue audit
 - do not reopen the fp32 sweep, mixed-bit calibration, or `5090` handoff refresh without an explicit queue reset or reprioritization
+
+## 2026-03-30 - sign-Hadamard preconditioned quantization probe died on exact slice eval
+
+Bounded follow-up from the TurboQuant / basis-preconditioning discussion:
+
+- isolated the work on `codex/precondition-quant-probe`
+- kept the public credits PR untouched
+- tested only one tensor:
+  - `blocks.0.mlp.proj.weight`
+- used one implicit basis change only:
+  - seeded sign + column Hadamard
+- judged it only by compressed bytes and exact post-roundtrip `val_bpb`
+
+Preflight on the promoted float artifact:
+
+- baseline symmetric target residual:
+  - `0.01210184`
+- preconditioned target residual:
+  - `0.00827772`
+- relative residual improvement:
+  - `+31.60%`
+- full-artifact compressed delta:
+  - `+83,240` bytes
+
+Because the reconstruction win was unusually large, the probe still earned one bounded exact Torch-side contiguous slice on `128` validation sequences / `131,072` tokens:
+
+- baseline symmetric:
+  - artifact `14,840,672`
+  - `val_bpb = 2.72234817`
+- sign-Hadamard target probe:
+  - artifact `14,853,984`
+  - `val_bpb = 2.72264963`
+
+Delta:
+
+- bytes:
+  - `+13,312`
+- exact `val_bpb`:
+  - `+0.00030146`
+
+Read:
+
+- the basis change improved local reconstruction geometry
+- but regressed the actual objective while costing more bytes
+- this is another clean negative result for the repo rule:
+  - exact post-roundtrip `val_bpb` beats prettier reconstruction metrics
+
+Updated recommendation:
+
+- kill the sign-Hadamard / basis-preconditioned quantization branch
+- do not widen it into the trainer
+- do not reopen the branch with a denser polar/cartesian rewrite

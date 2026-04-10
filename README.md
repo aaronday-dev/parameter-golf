@@ -1,59 +1,136 @@
 # Parameter Golf
 
-This repository contains a standalone Parameter Golf workspace built from the
-local experiment branch.
+Parameter Golf is now a finished compression and artifact-design study under a hard artifact budget.
 
-The main focus is simple:
+Current state: the canonical noun is `./bin/pg`. Mutable repo truth lives in `state/current.yaml`. The study close-out and findings live in `docs/STUDY_SUMMARY.md`.
 
-- train small language models under the challenge constraints
-- measure exact post-quantization `val_bpb`
-- compare architectural changes against compressed artifact size
-- keep the search legible through logs and notes
+It preserves:
+- the capped repo leader
+- the final study status and known drift
+- normalized archived-run reports
 
-## Current Best Verified Local Result
+It does not launch remote compute by itself, replace the raw trainers, reopen the frontier by implication, or turn research history into fake present-state truth.
 
-Best exact real-data result currently in this repo:
+## Study Status
 
-- run: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
-- exact `val_bpb = 2.35570158`
-- compressed artifact size: `15,109,864` bytes via `lzma` from an offline rank-64 residual sidecar on `blocks.0.mlp.proj.weight`
-- hardware: Apple Silicon M4 via MLX / Metal
+Closed on `2026-04-10`.
 
-Earlier milestones:
+Read this repo as:
+- a finished study of compression and artifact design under a hard byte cap
+- a preserved evidence surface for archived runs and normalized reports
+- a repo-local CLI for reading the frozen state cleanly
 
-- plain sequential `MLP_MULT=3`:
-  `2.37334218`
-- shared-core mirror + directional correction + `MLP_MULT=3`:
-  `2.38131855`
-- shared-core mirror + directional correction:
-  `2.38989686`
-
-Current local conclusion:
-
-- increasing useful capacity helped
-- extra recurrence and contraction-style controls mostly did not
-- moving the plain sequential winner from `MLP_MULT=3` to `MLP_MULT=4` produced the latest real-data gain
-- artifact compression now defaults to `lzma`, while old `zlib` artifacts remain readable
-- the current capped local leader is no longer a plain retrain; it is an offline derived carrier that preserves most of the sacred-tensor gain under the byte cap
-
-## What This Repo Contains
-
-- `train_gpt.py`
-  Torch/CUDA trainer.
-- `train_gpt_mlx.py`
-  Apple Silicon / MLX trainer used for local search.
-- `scripts/`
-  Run wrappers and small analysis helpers.
-- `docs/`
-  Research log, run notes, and archived upstream challenge material.
-- `results/`
-  Selected run logs.
-- `data/README.md`
-  Expected local dataset/tokenizer layout.
+Start with:
+- `state/current.yaml`
+- `docs/STUDY_SUMMARY.md`
+- `./bin/pg leaderboard --json`
 
 ## Quick Start
 
-Create a local environment:
+Use the canonical noun first:
+
+```bash
+./bin/pg --help
+```
+
+First clean success:
+
+```bash
+./bin/pg leaderboard --json
+```
+
+Machine path:
+
+```bash
+./bin/pg report --log results/mlx_full_seq_mlp4x_200_realval_vb524k.txt --output-dir /tmp/pg-report --json
+```
+
+Current capped repo leader from `state/current.yaml`:
+- run: `mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1`
+- exact `val_bpb = 2.35570158`
+- compressed artifact size: `15,109,864` bytes via `lzma`
+- hardware: Apple Silicon M4 via MLX / Metal
+
+Public support target for this slice is repo-local execution from a clone with Python 3.11+.
+For the canonical read-only CLI surface, install `pyyaml`.
+For training and broader experiment work, install the full repo requirements.
+
+## Canonical Commands
+
+Show the current frontier:
+
+```bash
+./bin/pg leaderboard --json
+```
+
+Show the active lane and drift boundary:
+
+```bash
+./bin/pg queue --json
+```
+
+Show the full parsed repo state:
+
+```bash
+./bin/pg state --json
+```
+
+Render one normalized run report:
+
+```bash
+./bin/pg report --log results/mlx_full_seq_mlp4x_200_realval_vb524k.txt --output-dir /tmp/pg-report --json
+```
+
+Compatibility surfaces remain available:
+- `scripts/render_parameter_golf_run_report.py`
+- `scripts/archive_parameter_golf_run.py`
+- `scripts/archive_parameter_golf_offline_result.py`
+- `scripts/run_parameter_golf_mlx_m4.sh`
+- `train_gpt.py`
+- `train_gpt_mlx.py`
+
+## JSON Contract
+
+All `./bin/pg ... --json` commands emit one envelope shape:
+
+```json
+{"ok":true,"command":"leaderboard","result":{...}}
+{"ok":false,"command":"leaderboard","error":{"type":"StateError","message":"...","details":{...}}}
+```
+
+For `state`, the nested `result.state` payload is the parsed `state/current.yaml` document.
+
+For `leaderboard`, the nested result reports the current repo leader, nearby baselines, and the current primary lane from the frozen state.
+
+For `queue`, the nested result reports current focus, lane status, automation state, dead families, and known drift.
+
+For `report`, the nested result includes `report_json`, `report_md`, `report_html`, and the normalized `report` payload.
+
+## Trust Boundary
+
+Parameter Golf is:
+- a closed study record
+- a report normalizer
+- a local experiment workspace with a frozen frontier state
+
+Parameter Golf is not:
+- a guaranteed best-model launcher
+- a rented-compute orchestrator
+- a substitute for `state/current.yaml`
+- an active instruction to keep searching
+
+If a doc disagrees with `state/current.yaml`, treat the YAML as current truth unless the user explicitly overrides it.
+
+## Operator Notes
+
+Read-only CLI bootstrap:
+
+```bash
+python -m pip install pyyaml
+./bin/pg leaderboard --json
+```
+
+Full experiment environment bootstrap:
 
 ```bash
 python3 -m venv .venv
@@ -65,50 +142,6 @@ Download the smoke tokenizer and dataset prefix used by the local MLX wrappers:
 
 ```bash
 .venv/bin/python data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1 --build-smoke
-```
-
-Then place any larger dataset prefixes under `./data/` using the layout in:
-
-- `data/README.md`
-
-To archive a finished run log into `results/` and update the current-best docs when
-appropriate:
-
-```bash
-python3 scripts/archive_parameter_golf_run.py RUN_ID
-```
-
-To archive an offline derived artifact result into the same `results/` / `results/reports/`
-shape:
-
-```bash
-python3 scripts/archive_parameter_golf_offline_result.py RUN_ID ...
-```
-
-To render a normalized report for a single archived run:
-
-```bash
-python3 scripts/render_parameter_golf_run_report.py \
-  --log results/mlx_full_seq_mlp4x_200_realval_vb524k.txt \
-  --output-dir /tmp/parameter-golf-report
-```
-
-For Apple Silicon MLX runs:
-
-```bash
-scripts/run_parameter_golf_mlx_m4.sh
-```
-
-For smoke mode:
-
-```bash
-RUN_MODE=smoke scripts/run_parameter_golf_mlx_m4.sh
-```
-
-For the longer local promotion profile:
-
-```bash
-RUN_MODE=promotion scripts/run_parameter_golf_mlx_m4.sh
 ```
 
 ## Included Experimental Highlights
@@ -138,6 +171,7 @@ The main running log lives in:
 - `docs/parameter-golf-research-log.md`
 - `docs/parameter-golf-hypothesis-worksheet.md`
 - `docs/local-only-active-queue.md`
+- `docs/STUDY_SUMMARY.md`
 
 Current practical takeaway:
 
@@ -145,7 +179,7 @@ Current practical takeaway:
 2. Blunt contraction / damping / attractor-style controls mostly failed.
 3. Spending more of the artifact budget on useful capacity produced the biggest
    recent gains.
-4. The best local result currently comes from a plain higher-capacity sequential
-   model that still fits under the `16 MB` artifact cap.
-5. Active planning is currently strict local-only; borrowed-compute handoffs are
-   inactive until compute is directly controllable.
+4. The final capped repo leader came from offline artifact design, not another
+   local architecture breakthrough.
+5. The repo is now closed as a study; old planning docs are evidence and context,
+   not active marching orders.

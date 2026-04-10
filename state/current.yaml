@@ -1,0 +1,147 @@
+schema_version: 1
+last_updated: 2026-04-10
+
+source_of_truth:
+  description: >
+    Single mutable source of current repo state. If prompts, docs, worksheets,
+    or runbooks disagree with this file, this file wins unless the user
+    explicitly overrides it.
+
+repo:
+  name: parameter-golf
+  root: /Users/aaronday/dev/parameter-golf
+
+project_status:
+  status: finished_study
+  closed_on: 2026-04-10
+  mode: archival_read_only
+  summary_doc: docs/STUDY_SUMMARY.md
+  reason: >
+    The local frontier is exhausted enough that more laptop-side hypothesis
+    churn is not honest progress. The only credible next step was one bounded
+    external-compute retrain lane, and that lane is being intentionally left
+    unanswered rather than reopened indefinitely.
+
+current_focus:
+  primary_lane: study_closed
+  secondary_lane: archival_read_only
+  friend_5090_lane: archived
+  notes:
+    - This repo is now packaged as a finished compression and artifact-design study.
+    - No completed RunPod artifact is present in this workspace as of 2026-04-10.
+    - Golf Scout automation remains paused and should not be resumed without an explicit reopen decision.
+
+frontier:
+  repo_leader:
+    kind: capped_repo_leader
+    run_id: mlx_full_seq_mlp4x_resid64_block0proj_offline_realval_v1
+    exact_val_bpb: 2.35570158
+    artifact_bytes: 15109864
+    artifact_compressor: lzma
+    hardware: Apple Silicon M4 via MLX / Metal
+    eval_scope: full
+    provenance: offline rank-64 fp16 residual sidecar on blocks.0.mlp.proj.weight
+  architecture_baseline:
+    kind: best_architecture_only_full_result
+    run_id: mlx_full_seq_mlp4x_200_realval_vb524k
+    exact_val_bpb: 2.35796063
+    artifact_bytes: null
+    artifact_compressor: null
+    eval_scope: full
+  over_budget_best:
+    run_id: mlx_full_seq_mlp4x_keepf_block0proj_200_realval_v2
+    exact_val_bpb: 2.35551193
+    artifact_bytes: 16263292
+    artifact_compressor: lzma
+    eval_scope: full
+  smoke_baseline:
+    run_id: mlx_seq_mlp4x_lzma_cmp_v2
+    exact_val_bpb: 2.61172375
+    eval_scope: smoke
+  latest_nearby_miss:
+    run_id: mlx_seq_dim528_mlp4x_lzma_cmp_v1
+    exact_val_bpb: 2.61440332
+    eval_scope: smoke
+
+mixed_bit_calibration:
+  recommended_profile_label: mlp6_attn6
+  recommended_bits_by_name: "*.mlp.fc.weight:6,*.mlp.proj.weight:6,*.attn.c_q.weight:6,*.attn.c_k.weight:6,*.attn.c_v.weight:6,*.attn.proj.weight:6"
+  exact_val_bpb: 2.364808808986397
+  artifact_bytes: 9521536
+  backup_profile_label: mlp5_attn7
+  backup_exact_val_bpb: 2.3837106068321563
+  backup_artifact_bytes: 8527564
+
+lanes:
+  local_offline:
+    status: archived_closed
+    source_doc: docs/local-only-active-queue.md
+    allowed_work:
+      - offline calibration sweeps near mlp6_attn6
+      - exact eval only
+      - capacity budget estimation
+      - parity sanity checks
+    not_allowed:
+      - borrowed GPU handoff refresh
+      - multi-hour sliding-eval runs without a new reason
+  runpod_first_tranche:
+    status: prepared_not_executed_closed
+    branch: codex/runpod-10l-v1
+    source_doc: docs/RUNPOD_START_HERE.md
+    question: >
+      Can a directly controlled 10-layer, MLP-3x retrain at model_dim=512,
+      num_heads=8, num_kv_heads=4, exported with the calibrated mlp6_attn6
+      mixed-bit profile, beat the current capped local leader of 2.35570158
+      val_bpb under the 16,000,000-byte cap on exact contiguous post-roundtrip
+      evaluation?
+    primary_run:
+      dry_run_id: cloud_10l_mlp3x_mlp6attn6_dryrun
+      run_id: cloud_10l_mlp3x_mlp6attn6_v1
+      followup_threshold_exact_val_bpb: 2.36025519
+    closure_note: >
+      This was the only credible remaining path to push farther, but it was not
+      executed before the repo was frozen as a study.
+  friend_5090:
+    status: archived
+    source_doc: handoffs/claude_5090_friend/README.md
+    reason: >
+      Borrowed-compute routing is not the preferred active lane; reactivate only
+      if the user explicitly asks for it.
+
+study_findings:
+  - Exact post-roundtrip val_bpb beat prettier reconstruction metrics and proxy wins.
+  - Straightforward sequential capacity beat most recurrence, damping, and stabilization ideas locally.
+  - Offline artifact design delivered the capped repo leader more effectively than another nearby architecture retrain.
+  - Mixed-bit calibration created major byte headroom, but not a direct no-retrain frontier win.
+  - The remaining unanswered question was a bounded external-compute retrain, not another local mechanism branch.
+
+dead_families:
+  - bigram-hash retry
+  - soft-floor retry
+  - row-subset sacred-tensor rescue
+  - fp32 sidecar retry as a frontier move
+  - naive tiled local residual retry
+  - naive mixed local residual retry
+  - sign-Hadamard or basis-preconditioned quantization branch
+
+automation:
+  golf_scout:
+    status: paused
+    automation_id: golf-scout
+    cadence: FREQ=HOURLY;INTERVAL=6
+    last_recorded_run_utc: 2026-03-29T16:27:24Z
+    branch: codex/scout-loop
+    last_outcome: queue_exhausted_no_op_audit
+
+known_drift:
+  - docs/parameter-golf-handover-prompt.md still treats the architecture baseline as the current best full local result.
+  - docs/parameter-golf-claude-hypothesis-prompt.md still treats the architecture baseline as the current best full local result.
+  - docs/parameter-golf-research-log.md header date is stale relative to its latest entries.
+  - docs/parameter-golf-next-runs.md is historical and should not be treated as the active queue.
+  - docs/local-only-active-queue.md is now historical because the study is closed.
+  - docs/RUNPOD_START_HERE.md documents an unanswered lane, not an active plan.
+
+update_rules:
+  - Update this file first when current state changes.
+  - If another doc must lag temporarily, add or update a known_drift entry here.
+  - Prefer generated surfaces over hand-copied prompt packets.
